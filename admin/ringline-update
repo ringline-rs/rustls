@@ -1,0 +1,182 @@
+#!/usr/bin/env python3
+"""Merge the newest upstream rustls release on this branch's line.
+
+Run from the repository root on the ringline branch (ringline/0.23). The
+script:
+
+1. Reads the merged upstream tag from RINGLINE.md (`Upstream: v/0.23.N`) and
+   the newest `v/0.23.*` tag at UPSTREAM. Moving to another line (0.24) is
+   done by hand.
+2. Merges that tag into a new branch, `ringline-update/0.23.M`.
+3. Resolves conflicts that come from the fork's mechanical changes: a
+   manifest from `admin/ringline-apply-rename --list-mechanical`, or a file
+   whose only fork changes are the alias lines that script adds. It takes
+   upstream's version and runs the script, which also sets the next patch
+   version of ringline-tls. Cargo.lock is regenerated from upstream's with
+   `cargo update --workspace`.
+4. Updates the `Upstream:` line, commits, and with --push opens a pull
+   request (or, if any other file conflicts, an issue naming the files).
+
+Exit status 0 also when there is nothing to do, or when a pull request or
+issue for that upstream release already exists.
+
+Usage: admin/ringline-update [--upstream URL] [--push] [--security]
+"""
+
+import argparse
+import re
+import subprocess
+import sys
+
+UPSTREAM = "https://github.com/rustls/rustls.git"
+ALIAS_LINES = {
+    "extern crate ringline_tls as rustls;",
+    "// This fork names its library `ringline_tls`; tests and benches keep the",
+    "// `rustls::` paths upstream uses.",
+    "",
+}
+DOCTEST_ALIAS_RE = re.compile(r"^\s*//[/!]\s?# extern crate ringline_tls as rustls;$")
+
+
+def run(*args, check=True, capture=True):
+    r = subprocess.run(args, capture_output=capture, text=True)
+    if check and r.returncode != 0:
+        sys.exit(f"{' '.join(args)} failed:\n{r.stdout}{r.stderr}")
+    return r.stdout.strip() if capture else ""
+
+
+def version_tuple(v):
+    return tuple(int(x) for x in v.split("."))
+
+
+def merged_upstream():
+    text = open("RINGLINE.md").read()
+    m = re.search(r"^Upstream: v/(\d+\.\d+\.\d+)$", text, re.M)
+    if not m:
+        sys.exit("RINGLINE.md: no `Upstream: v/X.Y.Z` line")
+    return m.group(1)
+
+
+def newest_on_line(upstream_url, current):
+    line = ".".join(current.split(".")[:2])
+    run("git", "fetch", "--quiet", upstream_url, f"refs/tags/v/{line}.*:refs/tags/v/{line}.*")
+    tags = run("git", "tag", "--list", f"v/{line}.*").split()
+    versions = [t[2:] for t in tags if re.fullmatch(rf"v/{re.escape(line)}\.\d+", t)]
+    newer = [v for v in versions if version_tuple(v) > version_tuple(current)]
+    return max(newer, key=version_tuple) if newer else None
+
+
+def fork_version():
+    text = open("rustls/Cargo.toml").read()
+    return re.search(r'^version = "(\d+\.\d+\.\d+)"$', text, re.M).group(1)
+
+
+def only_alias_changes(path, base_tag):
+    """Whether the fork's only changes to `path` since `base_tag` are alias
+    lines added by admin/ringline-apply-rename."""
+    diff = run("git", "diff", "--unified=0", f"refs/tags/{base_tag}", "HEAD", "--", path)
+    for line in diff.splitlines():
+        if line.startswith(("+++", "---", "@@", "diff ", "index ")):
+            continue
+        if line.startswith("-"):
+            return False
+        if line.startswith("+"):
+            body = line[1:]
+            if body not in ALIAS_LINES and not DOCTEST_ALIAS_RE.match(body):
+                return False
+    return True
+
+
+def gh(*args, check=True):
+    return run("gh", *args, check=check)
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--upstream", default=UPSTREAM)
+    ap.add_argument("--push", action="store_true", help="push the branch and open a pull request or issue")
+    ap.add_argument("--security", action="store_true", help="label the pull request as a security fix")
+    opts = ap.parse_args()
+
+    base_branch = run("git", "rev-parse", "--abbrev-ref", "HEAD")
+    current = merged_upstream()
+    newest = newest_on_line(opts.upstream, current)
+    if newest is None:
+        print(f"no upstream release after v/{current}")
+        return
+    tag = f"v/{newest}"
+    branch = f"ringline-update/{newest}"
+    title = f"Merge upstream rustls {tag}"
+    print(f"merging {tag} (merged: v/{current})")
+
+    if opts.push:
+        if gh("pr", "list", "--head", branch, "--state", "all", "--json", "number", "--jq", "length") != "0":
+            print(f"a pull request for {branch} exists")
+            return
+        if gh("issue", "list", "--search", f'"{title}" in:title', "--state", "open", "--json", "number", "--jq", "length") != "0":
+            print(f"an open issue for {tag} exists")
+            return
+
+    run("git", "checkout", "--quiet", "-b", branch)
+    merge = subprocess.run(["git", "merge", "--no-ff", "--no-commit", f"refs/tags/{tag}"], capture_output=True, text=True)
+    conflicts = run("git", "diff", "--name-only", "--diff-filter=U").split()
+    mechanical = set(run("python3", "admin/ringline-apply-rename", "--list-mechanical").split())
+    other = [
+        f for f in conflicts
+        if f != "Cargo.lock" and f not in mechanical and not only_alias_changes(f, f"v/{current}")
+    ]
+    if merge.returncode != 0 and not conflicts:
+        sys.exit(f"git merge failed:\n{merge.stdout}{merge.stderr}")
+    if other:
+        run("git", "merge", "--abort")
+        run("git", "checkout", "--quiet", base_branch)
+        run("git", "branch", "-D", branch)
+        body = (
+            f"Merging upstream `{tag}` into `{base_branch}` conflicts in files that hold "
+            f"ringline changes, which need resolving by hand:\n\n"
+            + "".join(f"- `{f}`\n" for f in other)
+            + f"\nMerged upstream so far: `v/{current}`."
+        )
+        print(body)
+        if opts.push:
+            gh("issue", "create", "--title", title, "--body", body)
+        return
+
+    for f in conflicts:
+        if f != "Cargo.lock":
+            run("git", "checkout", "--theirs", "--", f)
+    if "Cargo.lock" in conflicts:
+        run("git", "checkout", "--theirs", "--", "Cargo.lock")
+
+    major, minor, patch = version_tuple(fork_version())
+    next_version = f"{major}.{minor}.{patch + 1}"
+    run("python3", "admin/ringline-apply-rename", "--version", next_version)
+    text = open("RINGLINE.md").read()
+    open("RINGLINE.md", "w").write(re.sub(r"^Upstream: v/\S+$", f"Upstream: {tag}", text, flags=re.M))
+    run("cargo", "update", "--workspace", "--quiet")
+    run("git", "add", "-A")
+    run(
+        "git", "commit", "--quiet", "-m",
+        f"Merge upstream rustls {tag}; ringline-tls {next_version}\n\n"
+        f"Upstream: {tag}\n"
+        + (f"Resolved with admin/ringline-apply-rename: {', '.join(conflicts)}\n" if conflicts else ""),
+    )
+    print(f"committed on {branch}: ringline-tls {next_version}")
+
+    if opts.push:
+        run("git", "push", "--quiet", "origin", branch)
+        body = (
+            f"Merges upstream rustls `{tag}` into `{base_branch}` and sets ringline-tls "
+            f"{next_version}.\n\nUpstream: {tag}\n\n"
+            + (f"Conflicts resolved with `admin/ringline-apply-rename`: {', '.join(f'`{c}`' for c in conflicts)}.\n\n" if conflicts else "")
+            + f"Upstream changes: https://github.com/rustls/rustls/compare/v/{current}...{tag}\n\n"
+            "After merging, tag the merge commit `v" + next_version + "` to publish."
+        )
+        args = ["pr", "create", "--base", base_branch, "--head", branch, "--title", title, "--body", body]
+        if opts.security:
+            args += ["--label", "security"]
+        gh(*args)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,68 @@
+#!/usr/bin/env python3
+"""Check the RustSec database for advisories against the upstream rustls
+release this fork contains.
+
+`cargo audit` matches advisories by crate name, so it never reports
+`ringline-tls`. This script audits a lockfile that lists `rustls` at the
+upstream version named in RINGLINE.md (`Upstream: v/X.Y.Z`), and a control
+lockfile at rustls 0.23.44, which has known advisories. A control that
+reports nothing means the check itself is broken.
+
+Exit status: 0 no advisory; 1 an advisory affects the merged upstream
+version (the IDs are printed); 2 the check is broken.
+"""
+
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+
+CONTROL_VERSION = "0.23.44"
+
+
+def upstream_version():
+    with open("RINGLINE.md") as f:
+        m = re.search(r"^Upstream: v/(\d+\.\d+\.\d+)$", f.read(), re.M)
+    if not m:
+        sys.exit("RINGLINE.md: no `Upstream: v/X.Y.Z` line")
+    return m.group(1)
+
+
+def audit(version, workdir):
+    path = os.path.join(workdir, f"rustls-{version}.lock")
+    with open(path, "w") as f:
+        f.write(
+            "version = 3\n\n[[package]]\nname = \"rustls\"\n"
+            f"version = \"{version}\"\n"
+            "source = \"registry+https://github.com/rust-lang/crates.io-index\"\n"
+        )
+    out = subprocess.run(
+        ["cargo", "audit", "--file", path, "--json"], capture_output=True, text=True
+    )
+    try:
+        report = json.loads(out.stdout)
+    except json.JSONDecodeError:
+        print(out.stdout, out.stderr, file=sys.stderr)
+        sys.exit(2)
+    return sorted(v["advisory"]["id"] for v in report["vulnerabilities"]["list"])
+
+
+def main():
+    version = upstream_version()
+    with tempfile.TemporaryDirectory() as d:
+        control = audit(CONTROL_VERSION, d)
+        if not control:
+            print(f"control: rustls {CONTROL_VERSION} reported no advisory; the check is broken")
+            sys.exit(2)
+        print(f"control: rustls {CONTROL_VERSION}: {' '.join(control)}")
+        found = audit(version, d)
+    if found:
+        print(f"rustls {version} (merged upstream): {' '.join(found)}")
+        sys.exit(1)
+    print(f"rustls {version} (merged upstream): no advisory")
+
+
+if __name__ == "__main__":
+    main()
