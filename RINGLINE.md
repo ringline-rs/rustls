@@ -10,8 +10,9 @@ Upstream: v/0.23.46
 
 ringline needs changes to the TLS record layer, for example to encrypt into
 and decrypt out of its own buffers. The fork carries them and releases them
-on its own schedule. 0.1.0 has none: it is rustls 0.23.46 renamed, with
-rustls-webpki 0.103.16 or later. The design is in ringline's
+on its own schedule. Until the first such change, a release is the upstream
+release named on the `Upstream:` line, renamed, with rustls-webpki 0.103.16
+or later. The design is in ringline's
 [docs/rustls-quinn-forks-design.md](https://github.com/ringline-rs/ringline/blob/main/docs/rustls-quinn-forks-design.md).
 
 ## Branches and versions
@@ -22,8 +23,9 @@ rustls-webpki 0.103.16 or later. The design is in ringline's
   `git diff <newest merged upstream tag> ringline/0.23` is the whole of the
   fork's changes.
 - `ringline-tls` 0.1.x is based on rustls 0.23.x. A 0.1.x release never
-  changes the API incompatibly. An API change, or a move to rustls 0.24, is
-  a new minor version (0.2.0, ...).
+  changes the API incompatibly. An incompatible API change, or a move to
+  rustls 0.24, is a new minor version (0.2.0, ...). An upstream 0.23.x
+  release, which can add API, is a patch version.
 - The `Upstream:` line above names the upstream tag this version contains.
   Each release's notes carry the same line.
 - Upstream releases arrive as pull requests from `admin/ringline-update`.

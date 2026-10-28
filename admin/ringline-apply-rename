@@ -2,10 +2,9 @@
 """Apply the fork's mechanical changes to an upstream rustls tree.
 
 Run from the repository root. Idempotent: running it on a tree that already
-has the changes leaves it unchanged. admin/ringline-update resolves a
-conflicted file by taking upstream's version and running this script, when
-the fork's copy of that file is exactly what this script makes of the old
-upstream copy.
+has the changes leaves it unchanged. admin/ringline-update runs it on the old
+and new upstream trees before a three-way merge of each conflicted file, and
+on the merged tree before committing.
 
 The changes:
 - rustls/Cargo.toml: package `ringline-tls` at the fork's version, library

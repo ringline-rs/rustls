@@ -15,9 +15,11 @@ example ringline/0.23). The script:
    both sides, so only its other changes can conflict. A file whose merge
    still conflicts is left to a person: the merge is abandoned and an issue
    names the files.
-4. Runs admin/ringline-apply-rename with the next patch version, regenerates
-   Cargo.lock and fuzz/Cargo.lock from upstream's with
-   `cargo update --workspace`, updates the `Upstream:` line, and commits.
+4. Runs admin/ringline-apply-rename with the next patch version, updates the
+   lockfiles with `cargo update --workspace` (starting from upstream's copy
+   when one conflicted, then restoring any newer compatible version the
+   fork had locked), updates the `Upstream:` line, and commits. A file
+   upstream deleted, which the fork changed only mechanically, is deleted.
 5. With --push, pushes the branch and opens a pull request. It names the
    advisories the release fixes when cargo-audit is installed.
 
@@ -36,6 +38,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import tomllib
 
 UPSTREAM = "https://github.com/rustls/rustls.git"
 LOCKFILES = {"Cargo.lock": "Cargo.toml", "fuzz/Cargo.lock": "fuzz/Cargo.toml"}
@@ -92,7 +95,9 @@ def renamed_tree(tag, version, trees):
 
 def resolve(paths, old_tag, new_tag, version):
     """Three-way merge each path with both upstream copies renamed. Returns
-    {path: merged bytes} for the paths that merged cleanly."""
+    {path: merged bytes, or None to delete} for the paths that resolve: a
+    clean merge, or an upstream deletion of a file whose fork copy is the
+    renamed old upstream copy."""
     if not paths:
         return {}
     trees = []
@@ -103,7 +108,11 @@ def resolve(paths, old_tag, new_tag, version):
         for p in paths:
             ours = subprocess.run(["git", "show", f"HEAD:{p}"], capture_output=True)
             base, theirs = os.path.join(old, p), os.path.join(new, p)
-            if ours.returncode != 0 or not os.path.exists(base) or not os.path.exists(theirs):
+            if ours.returncode != 0 or not os.path.exists(base):
+                continue
+            if not os.path.exists(theirs):
+                if ours.stdout == open(base, "rb").read():
+                    merged[p] = None
                 continue
             with tempfile.NamedTemporaryFile(delete=False) as f:
                 f.write(ours.stdout)
@@ -135,11 +144,50 @@ def gh(*args, check=True):
     return run("gh", *args, check=check)
 
 
-def open_issue(title, body, push):
+def open_issue(title, body, push, security):
     print(body)
     if push and gh("issue", "list", "--search", f'"{title}" in:title', "--state", "open",
                    "--json", "number", "--jq", "length") == "0":
-        gh("issue", "create", "--title", title, "--body", body)
+        args = ["issue", "create", "--title", title, "--body", body]
+        if security:
+            args += ["--label", "security"]
+        gh(*args)
+
+
+def locked_versions(lockfile):
+    """{name: [versions]} from a Cargo.lock, or {} if absent."""
+    if not os.path.exists(lockfile):
+        return {}
+    data = tomllib.loads(open(lockfile).read())
+    out = {}
+    for pkg in data.get("package", []):
+        out.setdefault(pkg["name"], []).append(pkg["version"])
+    return out
+
+
+def compatible(a, b):
+    """Whether semver versions a and b are compatible (same major, or same
+    minor under 0.x, or same patch under 0.0.x)."""
+    va, vb = (re.match(r"(\d+)\.(\d+)\.(\d+)", v).groups() for v in (a, b))
+    if va[0] != "0":
+        return va[0] == vb[0]
+    if va[1] != "0":
+        return va[:2] == vb[:2]
+    return va == vb
+
+
+def restore_bumps(manifest, before, after):
+    """Re-apply versions the fork had locked (`before`) that are newer than,
+    and compatible with, what the update resolved (`after`). Packages locked
+    at several versions are left alone."""
+    for name, old in before.items():
+        new = after.get(name, [])
+        if len(old) != 1 or len(new) != 1 or old[0] == new[0]:
+            continue
+        if compatible(old[0], new[0]) and version_tuple(re.match(r"[\d.]+\d", old[0]).group()) > \
+                version_tuple(re.match(r"[\d.]+\d", new[0]).group()):
+            run("cargo", "update", "--quiet", "--manifest-path", manifest,
+                "-p", f"{name}@{new[0]}", "--precise", old[0], check=False)
 
 
 def main():
@@ -150,6 +198,8 @@ def main():
     opts = ap.parse_args()
 
     base_branch = run("git", "rev-parse", "--abbrev-ref", "HEAD")
+    if opts.push and opts.security:
+        gh("label", "create", "security", "--color", "d73a4a", "--force")
     current = merged_upstream()
     newest = newest_on_line(opts.upstream, current)
     if newest is None:
@@ -161,6 +211,7 @@ def main():
                 f"`{base_branch}` contains, and upstream has no newer release on this line. The "
                 f"fix needs backporting by hand. Run `admin/ringline-advisory-check` for the IDs.",
                 opts.push,
+                opts.security,
             )
         return
     tag = f"v/{newest}"
@@ -169,8 +220,6 @@ def main():
     print(f"merging {tag} (merged: v/{current})")
 
     if opts.push:
-        if opts.security:
-            gh("label", "create", "security", "--color", "d73a4a", "--force")
         existing = gh("pr", "list", "--head", branch, "--state", "all", "--json", "number,state",
                       "--jq", '.[] | select(.state == "OPEN") | .number')
         if existing:
@@ -212,11 +261,23 @@ def main():
                 + "".join(f"- `{f}`\n" for f in other)
                 + f"\nMerged upstream so far: `v/{current}`.",
                 opts.push,
+                opts.security,
             )
             return
         for f, content in merged.items():
-            with open(f, "wb") as out:
-                out.write(content)
+            if content is None:
+                run("git", "rm", "--quiet", "--force", "--", f)
+            else:
+                with open(f, "wb") as out:
+                    out.write(content)
+        locked_before = {}
+        for f in LOCKFILES:
+            ours = subprocess.run(["git", "show", f"HEAD:{f}"], capture_output=True, text=True)
+            if ours.returncode == 0:
+                data = tomllib.loads(ours.stdout)
+                locked_before[f] = {}
+                for pkg in data.get("package", []):
+                    locked_before[f].setdefault(pkg["name"], []).append(pkg["version"])
         for f in conflicts:
             if f in LOCKFILES:
                 run("git", "checkout", "--theirs", "--", f)
@@ -226,6 +287,7 @@ def main():
         for lock, manifest in LOCKFILES.items():
             if os.path.exists(manifest):
                 run("cargo", "update", "--quiet", "--workspace", "--manifest-path", manifest)
+                restore_bumps(manifest, locked_before.get(lock, {}), locked_versions(lock))
         run("git", "add", "-A")
         run(
             "git", "commit", "--quiet", "-m",
@@ -234,12 +296,13 @@ def main():
             + (f"Conflicts merged after admin/ringline-apply-rename: {', '.join(candidates)}\n" if candidates else "")
             + "Lockfiles regenerated with cargo update --workspace.\n",
         )
-    except Failed as e:
+    except Exception as e:
         run("git", "merge", "--abort", check=False)
         run("git", "reset", "--quiet", "--hard", check=False)
         run("git", "checkout", "--quiet", base_branch, check=False)
         run("git", "branch", "-D", branch, check=False)
-        open_issue(title, f"Merging upstream `{tag}` into `{base_branch}` failed:\n\n```\n{e}\n```", opts.push)
+        open_issue(title, f"Merging upstream `{tag}` into `{base_branch}` failed:\n\n```\n{e}\n```",
+                   opts.push, opts.security)
         return
     print(f"committed on {branch}: ringline-tls {next_version}")
 
