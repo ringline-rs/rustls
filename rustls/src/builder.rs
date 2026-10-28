@@ -30,6 +30,7 @@ use crate::{ClientConfig, ServerConfig};
 /// supported protocol versions.
 ///
 /// ```
+/// # extern crate ringline_tls as rustls;
 /// # #[cfg(feature = "aws_lc_rs")] {
 /// # rustls::crypto::aws_lc_rs::default_provider().install_default();
 /// use rustls::{ClientConfig, ServerConfig};
@@ -42,10 +43,12 @@ use crate::{ClientConfig, ServerConfig};
 /// # ;
 /// # }
 /// ```
+/// # extern crate ringline_tls as rustls;
 ///
 /// You may also override the choice of protocol versions:
 ///
 /// ```no_run
+/// # extern crate ringline_tls as rustls;
 /// # #[cfg(feature = "aws_lc_rs")] {
 /// # rustls::crypto::aws_lc_rs::default_provider().install_default();
 /// # use rustls::ServerConfig;
@@ -82,6 +85,7 @@ use crate::{ClientConfig, ServerConfig};
 /// For example:
 ///
 /// ```
+/// # extern crate ringline_tls as rustls;
 /// # #[cfg(feature = "aws_lc_rs")] {
 /// # rustls::crypto::aws_lc_rs::default_provider().install_default();
 /// # use rustls::ClientConfig;
@@ -91,6 +95,7 @@ use crate::{ClientConfig, ServerConfig};
 ///     .with_no_client_auth();
 /// # }
 /// ```
+/// # extern crate ringline_tls as rustls;
 ///
 /// # ServerConfig certificate configuration
 ///
@@ -106,6 +111,7 @@ use crate::{ClientConfig, ServerConfig};
 /// For example:
 ///
 /// ```no_run
+/// # extern crate ringline_tls as rustls;
 /// # #[cfg(feature = "aws_lc_rs")] {
 /// # rustls::crypto::aws_lc_rs::default_provider().install_default();
 /// # use rustls::ServerConfig;

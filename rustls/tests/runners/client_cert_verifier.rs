@@ -1,3 +1,7 @@
+// This fork names its library `ringline_tls`; tests and benches keep the
+// `rustls::` paths upstream uses.
+extern crate ringline_tls as rustls;
+
 #[macro_use]
 mod macros;
 

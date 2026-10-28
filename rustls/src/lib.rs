@@ -131,6 +131,7 @@
 //!                     |                       |
 //!     write_tls()     +-----------------------+      writer() as io::Write
 //! ```
+//! # extern crate ringline_tls as rustls;
 //!
 //! ### Rustls takes care of server certificate verification
 //! You do not need to provide anything other than a set of root certificates to trust.
@@ -144,6 +145,7 @@
 //! the Mozilla set of root certificates.
 //!
 //! ```rust,no_run
+//! # extern crate ringline_tls as rustls;
 //! # #[cfg(feature = "aws-lc-rs")] {
 //! let root_store = rustls::RootCertStore::from_iter(
 //!     webpki_roots::TLS_SERVER_ROOTS
@@ -152,6 +154,7 @@
 //! );
 //! # }
 //! ```
+//! # extern crate ringline_tls as rustls;
 //!
 //! [`webpki_roots`]: https://crates.io/crates/webpki-roots
 //!
@@ -159,6 +162,7 @@
 //! and use it for all connections made by that process.
 //!
 //! ```rust,no_run
+//! # extern crate ringline_tls as rustls;
 //! # #[cfg(feature = "aws_lc_rs")] {
 //! # let root_store: rustls::RootCertStore = panic!();
 //! let config = rustls::ClientConfig::builder()
@@ -166,11 +170,13 @@
 //!     .with_no_client_auth();
 //! # }
 //! ```
+//! # extern crate ringline_tls as rustls;
 //!
 //! Now we can make a connection.  You need to provide the server's hostname so we
 //! know what to expect to find in the server's certificate.
 //!
 //! ```rust
+//! # extern crate ringline_tls as rustls;
 //! # #[cfg(feature = "aws_lc_rs")] {
 //! # use rustls;
 //! # use webpki;
@@ -189,6 +195,7 @@
 //! let mut client = rustls::ClientConnection::new(rc_config, example_com);
 //! # }
 //! ```
+//! # extern crate ringline_tls as rustls;
 //!
 //! Now you should do appropriate IO for the `client` object.  If `client.wants_read()` yields
 //! true, you should call `client.read_tls()` when the underlying connection has data.
@@ -214,6 +221,7 @@
 //! errors.
 //!
 //! ```rust,no_run
+//! # extern crate ringline_tls as rustls;
 //! # #[cfg(feature = "aws_lc_rs")] {
 //! # let mut client = rustls::ClientConnection::new(panic!(), panic!()).unwrap();
 //! # struct Socket { }
@@ -258,6 +266,7 @@
 //! }
 //! # }
 //! ```
+//! # extern crate ringline_tls as rustls;
 //!
 //! # Examples
 //!

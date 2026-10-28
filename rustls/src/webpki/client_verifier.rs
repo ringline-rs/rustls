@@ -200,6 +200,7 @@ impl ClientCertVerifierBuilder {
 ///
 /// To require all clients present a client certificate issued by a trusted CA:
 /// ```no_run
+/// # extern crate ringline_tls as rustls;
 /// # #[cfg(any(feature = "ring", feature = "aws_lc_rs"))] {
 /// # use rustls::RootCertStore;
 /// # use rustls::server::WebPkiClientVerifier;
@@ -209,10 +210,12 @@ impl ClientCertVerifierBuilder {
 ///   .unwrap();
 /// # }
 /// ```
+/// # extern crate ringline_tls as rustls;
 ///
 /// Or, to allow clients presenting a client certificate authenticated by a trusted CA, or
 /// anonymous clients that present no client certificate:
 /// ```no_run
+/// # extern crate ringline_tls as rustls;
 /// # #[cfg(any(feature = "ring", feature = "aws_lc_rs"))] {
 /// # use rustls::RootCertStore;
 /// # use rustls::server::WebPkiClientVerifier;
@@ -223,18 +226,22 @@ impl ClientCertVerifierBuilder {
 ///   .unwrap();
 /// # }
 /// ```
+/// # extern crate ringline_tls as rustls;
 ///
 /// If you wish to disable advertising client authentication:
 /// ```no_run
+/// # extern crate ringline_tls as rustls;
 /// # use rustls::RootCertStore;
 /// # use rustls::server::WebPkiClientVerifier;
 /// # let roots = RootCertStore::empty();
 /// let client_verifier = WebPkiClientVerifier::no_client_auth();
 /// ```
+/// # extern crate ringline_tls as rustls;
 ///
 /// You can also configure the client verifier to check for certificate revocation with
 /// client certificate revocation lists (CRLs):
 /// ```no_run
+/// # extern crate ringline_tls as rustls;
 /// # #[cfg(any(feature = "ring", feature = "aws_lc_rs"))] {
 /// # use rustls::RootCertStore;
 /// # use rustls::server::{WebPkiClientVerifier};

@@ -4,6 +4,10 @@
 //! executable, and runs tests in an indeterminate order.  That restricts us
 //! to doing all the desired tests, in series, in one function.
 
+// This fork names its library `ringline_tls`; tests and benches keep the
+// `rustls::` paths upstream uses.
+extern crate ringline_tls as rustls;
+
 use rustls::ClientConfig;
 use rustls::crypto::CryptoProvider;
 #[cfg(all(feature = "aws_lc_rs", not(feature = "ring")))]

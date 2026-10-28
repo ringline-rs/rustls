@@ -793,6 +793,7 @@ mod connection {
     /// # Example
     ///
     /// ```no_run
+    /// # extern crate ringline_tls as rustls;
     /// # #[cfg(feature = "aws_lc_rs")] {
     /// # fn choose_server_config(
     /// #     _: rustls::server::ClientHello,
@@ -824,6 +825,7 @@ mod connection {
     /// # }
     /// # }
     /// ```
+    /// # extern crate ringline_tls as rustls;
     pub struct Acceptor {
         inner: Option<ConnectionCommon<ServerConnectionData>>,
     }

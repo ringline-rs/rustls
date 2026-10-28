@@ -123,6 +123,7 @@ pub use crate::suites::CipherSuiteCommon;
 /// API (with [`ConfigBuilder::with_single_cert`], etc.), it might look like this:
 ///
 /// ```
+/// # extern crate ringline_tls as rustls;
 /// # #[cfg(feature = "aws_lc_rs")] {
 /// # use std::sync::Arc;
 /// # mod fictious_hsm_api { pub fn load_private_key(key_der: pki_types::PrivateKeyDer<'static>) -> ! { unreachable!(); } }
@@ -170,6 +171,7 @@ pub use crate::suites::CipherSuiteCommon;
 /// Content-Type: text/html; charset=utf-8
 /// Content-Length: 19899
 /// ```
+/// # extern crate ringline_tls as rustls;
 ///
 /// [`provider-example/`]: https://github.com/rustls/rustls/tree/main/provider-example/
 /// [`RustCrypto`]: https://github.com/RustCrypto
@@ -670,15 +672,18 @@ impl From<Vec<u8>> for SharedSecret {
 /// Install this as the process-default provider, like:
 ///
 /// ```rust
+/// # extern crate ringline_tls as rustls;
 /// # #[cfg(feature = "fips")] {
 /// rustls::crypto::default_fips_provider().install_default()
 ///     .expect("default provider already set elsewhere");
 /// # }
 /// ```
+/// # extern crate ringline_tls as rustls;
 ///
 /// You can also use this explicitly, like:
 ///
 /// ```rust
+/// # extern crate ringline_tls as rustls;
 /// # #[cfg(feature = "fips")] {
 /// # let root_store = rustls::RootCertStore::empty();
 /// let config = rustls::ClientConfig::builder_with_provider(
