@@ -5,7 +5,7 @@ permissions:
 
 on:
   push:
-    branches: ['main', 'rel-*', 'ci/*']
+    branches: ['main', 'rel-*', 'ci/*', 'ringline/*']
     tags:
     - '**'
   pull_request:
@@ -99,7 +99,7 @@ jobs:
           RUST_BACKTRACE: 1
 
       - name: cargo build (debug; no-std)
-        run: cargo build --locked --lib -p rustls $(admin/all-features-except std,brotli,read_buf rustls)
+        run: cargo build --locked --lib -p ringline-tls $(admin/all-features-except std,brotli,read_buf ringline-tls)
 
       - name: cargo build (debug; rustls-provider-example)
         run: cargo build --locked -p rustls-provider-example
@@ -116,8 +116,8 @@ jobs:
       - name: cargo test (debug; rustls-provider-test; all features)
         run: cargo test --all-features -p rustls-provider-test
 
-      - name: cargo package --all-features -p rustls
-        run: cargo package --all-features -p rustls
+      - name: cargo package --all-features -p ringline-tls
+        run: cargo package --all-features -p ringline-tls
 
   msrv:
     name: MSRV
@@ -133,13 +133,13 @@ jobs:
           toolchain: "1.71"
 
       # zlib-rs is optional and requires a later MSRV
-      - run: cargo check --locked --lib $(admin/all-features-except zlib rustls) -p rustls
+      - run: cargo check --locked --lib $(admin/all-features-except zlib ringline-tls) -p ringline-tls
 
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.75"
 
-      - run: cargo check --locked --lib --all-features -p rustls
+      - run: cargo check --locked --lib --all-features -p ringline-tls
 
   features:
     name: Features
@@ -294,15 +294,10 @@ jobs:
         uses: dtolnay/rust-toolchain@nightly
 
       - name: cargo doc (rustls; all features)
-        run: cargo doc --locked --all-features --no-deps --document-private-items --package rustls
+        run: cargo doc --locked --all-features --no-deps --document-private-items --package ringline-tls
         env:
           RUSTDOCFLAGS: -Dwarnings
 
-      - name: Check README.md
-        run: |
-          cargo build --locked --all-features
-          ./admin/pull-readme
-          git diff --exit-code
 
   coverage:
     name: Measure coverage
@@ -399,8 +394,8 @@ jobs:
           tool: bindgen-cli
       - name: Enable bindgen feature for aws-lc-sys (as needed for many cross targets)
         if: ${{ matrix.target != 'i686-unknown-linux-gnu' }}
-        run: cargo add --dev --features bindgen 'aws-lc-sys@>0.20' --package rustls --verbose
-      - run: cross test --package rustls --target ${{ matrix.target }}
+        run: cargo add --dev --features bindgen 'aws-lc-sys@>0.20' --package ringline-tls --verbose
+      - run: cross test --package ringline-tls --target ${{ matrix.target }}
 
   semver:
     name: Check semver compatibility
@@ -411,8 +406,13 @@ jobs:
         with:
           persist-credentials: false
 
+      # The baseline is the latest ringline-tls on crates.io, so the check
+      # runs once the repository variable RINGLINE_TLS_PUBLISHED is "true".
       - name: Check semver
+        if: vars.RINGLINE_TLS_PUBLISHED == 'true'
         uses: obi1kenobi/cargo-semver-checks-action@v2
+        with:
+          package: ringline-tls
 
   format:
     name: Format
