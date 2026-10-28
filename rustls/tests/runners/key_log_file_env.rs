@@ -1,5 +1,9 @@
 #![allow(clippy::disallowed_types)]
 
+// This fork names its library `ringline_tls`; tests and benches keep the
+// `rustls::` paths upstream uses.
+extern crate ringline_tls as rustls;
+
 use std::env;
 use std::sync::Mutex;
 

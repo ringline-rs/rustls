@@ -1,18 +1,21 @@
 [package]
-name = "rustls"
-version = "0.23.46"
+name = "ringline-tls"
+version = "0.1.0"
 edition = "2021"
 rust-version = "1.71"
 license = "Apache-2.0 OR ISC OR MIT"
-readme = "../README.md"
-description = "Rustls is a modern TLS library written in Rust."
-homepage = "https://github.com/rustls/rustls"
-repository = "https://github.com/rustls/rustls"
+readme = "../RINGLINE.md"
+description = "A fork of rustls 0.23 maintained for ringline."
+homepage = "https://github.com/ringline-rs/rustls"
+repository = "https://github.com/ringline-rs/rustls"
 categories = ["network-programming", "cryptography"]
 autobenches = false
 autotests = false
 exclude = ["src/testdata", "tests/**"]
 build = "build.rs"
+
+[lib]
+name = "ringline_tls"
 
 [features]
 default = ["aws_lc_rs", "logging", "prefer-post-quantum", "std", "tls12"]

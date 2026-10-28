@@ -1,3 +1,7 @@
+// This fork names its library `ringline_tls`; tests and benches keep the
+// `rustls::` paths upstream uses.
+extern crate ringline_tls as rustls;
+
 // Runs the bogo test suite, in the form of a rust test.
 // Note that bogo requires a golang environment to build
 // and run.

@@ -1,0 +1,283 @@
+#!/usr/bin/env python3
+"""Apply the fork's mechanical changes to an upstream rustls tree.
+
+Run from the repository root. Idempotent: running it on a tree that already
+has the changes leaves it unchanged. admin/ringline-update runs it on the old
+and new upstream trees before a three-way merge of each conflicted file, and
+on the merged tree before committing.
+
+The changes:
+- rustls/Cargo.toml: package `ringline-tls` at the fork's version, library
+  `ringline_tls`, fork metadata, RINGLINE.md as the README.
+- Every member (and fuzz/) that depends on ../rustls does so under the key
+  `rustls`, naming the package `ringline-tls`.
+- rustls-post-quantum is not published.
+- The root [patch.crates-io] entry for `rustls` is removed.
+- The root `webpki` requirement is at least WEBPKI_FLOOR.
+- copy-count/ is a workspace member.
+- The package's test, bench and example roots, and every doctest that names
+  `rustls`, alias the library as `rustls`.
+- admin/clippy, admin/coverage and the workflows name the package
+  `ringline-tls`; admin/clippy leaves out rustls-bench's `graviola` feature,
+  whose crate implements upstream rustls's traits.
+
+Usage: admin/ringline-apply-rename [--version X.Y.Z]
+"""
+
+import argparse
+import os
+import re
+import sys
+
+WEBPKI_FLOOR = (0, 103, 16)
+WEBPKI_FLOOR_COMMENT = (
+    "# ringline-tls: >= 0.103.16 for RUSTSEC-2026-0382 (certificate verification\n"
+    "# may accept distrusted intermediates). Upstream 0.23.46 requires 0.103.14.\n"
+)
+def members():
+    """Workspace directories (and fuzz/) whose manifest depends on ../rustls."""
+    found = []
+    for d in sorted(os.listdir(".")):
+        p = os.path.join(d, "Cargo.toml")
+        if d != "rustls" and os.path.isfile(p) and re.search(r'^rustls = \{.*path = "\.\./rustls"', read(p), re.M):
+            found.append(d)
+    return found
+
+
+# Files outside the manifests whose `rustls` package names are rewritten.
+SCRIPTS = ["admin/clippy", "admin/coverage"]
+WORKFLOWS_DIR = ".github/workflows"
+ALIAS = "extern crate ringline_tls as rustls;"
+ALIAS_COMMENT = [
+    "// This fork names its library `ringline_tls`; tests and benches keep the",
+    "// `rustls::` paths upstream uses.",
+]
+DOCTEST_ALIAS = "# extern crate ringline_tls as rustls;"
+
+
+def read(p):
+    with open(p) as f:
+        return f.read()
+
+
+def write(p, s):
+    if read(p) != s:
+        with open(p, "w") as f:
+            f.write(s)
+
+
+def set_key(section_text, key, value):
+    """Set `key = value` in a TOML section's text, adding it if absent."""
+    pat = re.compile(rf"^{re.escape(key)} = .*$", re.M)
+    line = f"{key} = {value}"
+    if pat.search(section_text):
+        return pat.sub(line, section_text, count=1)
+    return section_text.rstrip("\n") + "\n" + line + "\n"
+
+
+def package_manifest(version):
+    p = "rustls/Cargo.toml"
+    s = read(p)
+    head, sep, rest = s.partition("\n[features]")
+    if not sep:
+        sys.exit(f"{p}: no [features] section")
+    head = set_key(head, "name", '"ringline-tls"')
+    if version:
+        head = set_key(head, "version", f'"{version}"')
+    head = set_key(
+        head,
+        "description",
+        '"A fork of rustls 0.23 maintained for ringline."',
+    )
+    head = set_key(head, "homepage", '"https://github.com/ringline-rs/rustls"')
+    head = set_key(head, "repository", '"https://github.com/ringline-rs/rustls"')
+    head = set_key(head, "readme", '"../RINGLINE.md"')
+    if "\n[lib]\n" not in head:
+        head = head.rstrip("\n") + '\n\n[lib]\nname = "ringline_tls"\n'
+    write(p, head + sep + rest)
+
+
+def member_manifests():
+    for m in members():
+        p = f"{m}/Cargo.toml"
+        s = read(p)
+        # `rustls = { ... path = "../rustls" ... }`: name the package, drop a
+        # version requirement (the fork's versions are not upstream's).
+        def fix(mt):
+            body = mt.group(1)
+            body = re.sub(r'version = "[^"]*",\s*', "", body)
+            if 'package = "ringline-tls"' not in body:
+                body = 'package = "ringline-tls", ' + body
+            return "rustls = { " + body + " }"
+
+        s = re.sub(r'^rustls = \{ (.*path = "\.\./rustls".*?) \}$', fix, s, flags=re.M)
+        if m == "rustls-post-quantum" and not re.search(r"^publish = false$", s, re.M):
+            s = re.sub(r'^(version = "[^"]*")$', r"\1\npublish = false", s, count=1, flags=re.M)
+        write(p, s)
+
+
+def root_manifest():
+    p = "Cargo.toml"
+    s = read(p)
+    s = re.sub(
+        r"# ensure all our tests are against the local copy, never\n"
+        r"# against the latest _published_ copy\.\n"
+        r"\[patch\.crates-io\]\n"
+        r'rustls = \{ path = "rustls" \}',
+        "# The workspace members depend on the `ringline-tls` package by path, under\n"
+        "# the key `rustls`. Upstream patched crates.io `rustls` here; that patch cannot\n"
+        "# name a package called `ringline-tls`, so crates from crates.io that depend on\n"
+        "# `rustls` get the upstream crate.",
+        s,
+    )
+    m = re.search(r'^(webpki = \{ package = "rustls-webpki", version = ")(\d+)\.(\d+)\.(\d+)(".*)$', s, re.M)
+    if not m:
+        sys.exit("Cargo.toml: no webpki requirement")
+    have = tuple(int(x) for x in m.group(2, 3, 4))
+    if have < WEBPKI_FLOOR:
+        line = m.group(1) + ".".join(map(str, WEBPKI_FLOOR)) + m.group(5)
+        s = s[: m.start()] + line + s[m.end():]
+    if WEBPKI_FLOOR_COMMENT not in s and have <= WEBPKI_FLOOR:
+        s = s.replace("webpki = { package", WEBPKI_FLOOR_COMMENT + "webpki = { package", 1)
+    if '"copy-count",' not in s:
+        s = s.replace(
+            '  # CI benchmarks\n  "ci-bench",',
+            '  # CI benchmarks\n  "ci-bench",\n'
+            "  # ringline-tls: bytes copied per plaintext byte (Linux, LD_PRELOAD shim)\n"
+            '  "copy-count",',
+            1,
+        )
+        if '"copy-count",' not in s:
+            sys.exit("Cargo.toml: could not add copy-count to the workspace members")
+    write(p, s)
+
+
+def target_roots():
+    s = read("rustls/Cargo.toml")
+    return ["rustls/" + p for p in re.findall(r'^path = "([^"]+)"', s, re.M)]
+
+
+def alias_roots():
+    for p in target_roots():
+        lines = read(p).split("\n")
+        if ALIAS in lines:
+            continue
+        i, last = 0, -1
+        while i < len(lines):
+            line = lines[i].strip()
+            if line.startswith("#![") or line.startswith("//!"):
+                if line.startswith("#![") and not line.endswith("]"):
+                    while not lines[i].strip().endswith("]"):
+                        i += 1
+                last = i
+                i += 1
+                continue
+            if line == "" and last >= 0:
+                i += 1
+                continue
+            break
+        if last >= 0:
+            lines[last + 1:last + 1] = [""] + ALIAS_COMMENT + [ALIAS]
+        else:
+            lines[0:0] = ALIAS_COMMENT + [ALIAS, ""]
+        write(p, "\n".join(lines))
+
+
+def alias_doctests():
+    fence = re.compile(r"^(\s*(?://[/!])\s?)```(.*)$")
+    close = re.compile(r"^\s*//[/!]\s?```\s*$")
+    for root, _, files in os.walk("rustls/src"):
+        for f in files:
+            if not f.endswith(".rs"):
+                continue
+            p = os.path.join(root, f)
+            lines = read(p).split("\n")
+            out, i = [], 0
+            while i < len(lines):
+                m = fence.match(lines[i])
+                if not m:
+                    out.append(lines[i])
+                    i += 1
+                    continue
+                prefix = m.group(1)
+                langs = [x.strip() for x in m.group(2).split(",") if x.strip()]
+                j = i + 1
+                while j < len(lines) and not close.match(lines[j]):
+                    j += 1
+                body = "\n".join(lines[i + 1:j])
+                rust = all(
+                    x in ("rust", "no_run", "should_panic", "compile_fail") or x.startswith("edition")
+                    for x in langs
+                )
+                names_rustls = re.search(r"\brustls::|use rustls\b", body)
+                out.append(lines[i])
+                if rust and names_rustls and DOCTEST_ALIAS not in body:
+                    out.append(prefix + DOCTEST_ALIAS)
+                # The block, through its closing fence, is copied as is; the
+                # closing fence must not be read as an opening one.
+                out.extend(lines[i + 1:j + 1])
+                i = j + 1
+            write(p, "\n".join(out))
+
+
+def rename_package_args(text):
+    text = re.sub(r"(-p|--package) rustls(?=[\s)]|$)", r"\1 ringline-tls", text, flags=re.M)
+    text = re.sub(r"(all-features-except [\w,-]+) rustls\)", r"\1 ringline-tls)", text)
+    return text
+
+
+CLIPPY_BENCH_CASE = """    rustls-bench)
+      # rustls-graviola implements upstream rustls's traits, not ringline-tls's
+      ALL_FEATURES="--features aws-lc-rs,fips,post-quantum,ring"
+      ;;
+"""
+
+
+def scripts_and_workflows():
+    paths = [p for p in SCRIPTS if os.path.exists(p)]
+    if os.path.isdir(WORKFLOWS_DIR):
+        paths += [os.path.join(WORKFLOWS_DIR, f) for f in sorted(os.listdir(WORKFLOWS_DIR)) if f.endswith(".yml")]
+    for p in paths:
+        s = rename_package_args(read(p))
+        if p == "admin/clippy" and "rustls-bench)" not in s:
+            s = s.replace('  case "$p" in\n', '  case "$p" in\n' + CLIPPY_BENCH_CASE, 1)
+            if "rustls-bench)" not in s:
+                sys.exit("admin/clippy: could not add the rustls-bench case")
+        write(p, s)
+
+
+def check_doctest_aliases():
+    """Fail if an alias line is outside a code block, where rustdoc would
+    render it as a heading."""
+    fence = re.compile(r"^\s*//[/!]\s?```")
+    bad = []
+    for root, _, files in os.walk("rustls/src"):
+        for f in files:
+            if not f.endswith(".rs"):
+                continue
+            p = os.path.join(root, f)
+            inside = False
+            for n, line in enumerate(read(p).split("\n"), 1):
+                if fence.match(line):
+                    inside = not inside
+                elif DOCTEST_ALIAS in line and not inside:
+                    bad.append(f"{p}:{n}")
+    if bad:
+        sys.exit("alias lines outside a code block:\n" + "\n".join(bad))
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--version", help="set the ringline-tls package version")
+    opts = ap.parse_args()
+    package_manifest(opts.version)
+    member_manifests()
+    root_manifest()
+    alias_roots()
+    alias_doctests()
+    scripts_and_workflows()
+    check_doctest_aliases()
+
+
+if __name__ == "__main__":
+    main()

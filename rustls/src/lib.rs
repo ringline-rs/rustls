@@ -144,6 +144,7 @@
 //! the Mozilla set of root certificates.
 //!
 //! ```rust,no_run
+//! # extern crate ringline_tls as rustls;
 //! # #[cfg(feature = "aws-lc-rs")] {
 //! let root_store = rustls::RootCertStore::from_iter(
 //!     webpki_roots::TLS_SERVER_ROOTS
@@ -159,6 +160,7 @@
 //! and use it for all connections made by that process.
 //!
 //! ```rust,no_run
+//! # extern crate ringline_tls as rustls;
 //! # #[cfg(feature = "aws_lc_rs")] {
 //! # let root_store: rustls::RootCertStore = panic!();
 //! let config = rustls::ClientConfig::builder()
@@ -171,6 +173,7 @@
 //! know what to expect to find in the server's certificate.
 //!
 //! ```rust
+//! # extern crate ringline_tls as rustls;
 //! # #[cfg(feature = "aws_lc_rs")] {
 //! # use rustls;
 //! # use webpki;
@@ -214,6 +217,7 @@
 //! errors.
 //!
 //! ```rust,no_run
+//! # extern crate ringline_tls as rustls;
 //! # #[cfg(feature = "aws_lc_rs")] {
 //! # let mut client = rustls::ClientConnection::new(panic!(), panic!()).unwrap();
 //! # struct Socket { }

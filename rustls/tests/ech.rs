@@ -1,3 +1,7 @@
+// This fork names its library `ringline_tls`; tests and benches keep the
+// `rustls::` paths upstream uses.
+extern crate ringline_tls as rustls;
+
 use base64::prelude::{BASE64_STANDARD, Engine};
 use pki_types::DnsName;
 use rustls::internal::msgs::codec::{Codec, Reader};

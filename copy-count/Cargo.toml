@@ -1,0 +1,15 @@
+[package]
+name = "ringline-tls-copy-count"
+version = "0.0.0"
+edition = "2021"
+license = "Apache-2.0 OR ISC OR MIT"
+description = "Counts the bytes ringline-tls copies per plaintext byte on its unbuffered send and receive paths"
+publish = false
+
+[dependencies]
+libc = "0.2"
+rcgen = { workspace = true }
+rustls = { package = "ringline-tls", path = "../rustls", default-features = false, features = ["std", "ring"] }
+
+[build-dependencies]
+cc = "1"

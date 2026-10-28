@@ -123,6 +123,7 @@ pub use crate::suites::CipherSuiteCommon;
 /// API (with [`ConfigBuilder::with_single_cert`], etc.), it might look like this:
 ///
 /// ```
+/// # extern crate ringline_tls as rustls;
 /// # #[cfg(feature = "aws_lc_rs")] {
 /// # use std::sync::Arc;
 /// # mod fictious_hsm_api { pub fn load_private_key(key_der: pki_types::PrivateKeyDer<'static>) -> ! { unreachable!(); } }
@@ -670,6 +671,7 @@ impl From<Vec<u8>> for SharedSecret {
 /// Install this as the process-default provider, like:
 ///
 /// ```rust
+/// # extern crate ringline_tls as rustls;
 /// # #[cfg(feature = "fips")] {
 /// rustls::crypto::default_fips_provider().install_default()
 ///     .expect("default provider already set elsewhere");
@@ -679,6 +681,7 @@ impl From<Vec<u8>> for SharedSecret {
 /// You can also use this explicitly, like:
 ///
 /// ```rust
+/// # extern crate ringline_tls as rustls;
 /// # #[cfg(feature = "fips")] {
 /// # let root_store = rustls::RootCertStore::empty();
 /// let config = rustls::ClientConfig::builder_with_provider(

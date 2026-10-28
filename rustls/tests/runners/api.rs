@@ -2,6 +2,10 @@
 #![cfg_attr(read_buf, feature(core_io))]
 #![cfg_attr(read_buf, feature(core_io_borrowed_buf))]
 
+// This fork names its library `ringline_tls`; tests and benches keep the
+// `rustls::` paths upstream uses.
+extern crate ringline_tls as rustls;
+
 use std::cell::RefCell;
 
 #[macro_use]
