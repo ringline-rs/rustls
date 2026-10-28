@@ -21,8 +21,8 @@ example ringline/0.23). The script:
    when one conflicted), and re-locks each package the fork had moved away
    from the old upstream lockfile, when the fork's version is newer than and
    compatible with the new one. A re-lock that cargo refuses is listed in
-   the commit and the pull request. Then it updates the `Upstream:` line and
-   commits.
+   the commit and the pull request. It also updates the `Upstream:` line,
+   then commits.
 5. With --push, pushes the branch and opens a pull request. It names the
    advisories the release fixes when cargo-audit is installed.
 
@@ -187,15 +187,17 @@ def compatible(a, b):
     return va == vb
 
 
-def restore_bumps(manifest, forked, after):
+def restore_bumps(lock, manifest, forked):
     """Re-lock the packages the fork moved (`forked`: {name: [versions]},
     only packages whose fork lock differs from the old upstream lock) where
-    the fork's version is newer than, and compatible with, what the update
-    resolved (`after`). Packages locked at several versions are left alone.
-    Returns the re-locks cargo refused, as (name, fork version, new version)."""
+    the fork's version is newer than, and compatible with, the current lock.
+    The lock is re-read before each re-lock, since one can move another
+    package. Packages locked at several versions are left alone. Returns the
+    re-locks cargo refused, as (lock, name, fork version, kept version,
+    cargo's last error line)."""
     refused = []
     for name, old in forked.items():
-        new = after.get(name, [])
+        new = locked_versions(lock).get(name, [])
         if len(old) != 1 or len(new) != 1 or old[0] == new[0]:
             continue
         if compatible(old[0], new[0]) and version_tuple(re.match(r"[\d.]+\d", old[0]).group()) > \
@@ -203,7 +205,8 @@ def restore_bumps(manifest, forked, after):
             r = subprocess.run(["cargo", "update", "--quiet", "--manifest-path", manifest,
                                 "-p", f"{name}@{new[0]}", "--precise", old[0]], capture_output=True)
             if r.returncode != 0:
-                refused.append((name, old[0], new[0]))
+                lines = r.stderr.decode(errors="replace").strip().splitlines()
+                refused.append((lock, name, old[0], new[0], lines[-1] if lines else "no error output"))
     return refused
 
 
@@ -303,7 +306,7 @@ def main():
         for lock, manifest in LOCKFILES.items():
             if os.path.exists(manifest):
                 run("cargo", "update", "--quiet", "--workspace", "--manifest-path", manifest)
-                refused += restore_bumps(manifest, forked.get(lock, {}), locked_versions(lock))
+                refused += restore_bumps(lock, manifest, forked.get(lock, {}))
         merged_files = [f for f in candidates if merged.get(f) is not None]
         deleted_files = [f for f in candidates if f in merged and merged[f] is None]
         report = (
@@ -311,10 +314,11 @@ def main():
              if merged_files else "")
             + (f"Deleted upstream, fork changes mechanical only: {', '.join(deleted_files)}\n"
                if deleted_files else "")
-            + "Lockfiles updated with cargo update --workspace; the fork's newer compatible "
-              "locks restored.\n"
-            + "".join(f"Fork lock not kept (upstream's requirements exclude it): {n} {o} (now {w})\n"
-                      for n, o, w in refused)
+            + "Lockfiles updated with cargo update --workspace, then the fork's newer compatible "
+              "locks re-applied where cargo accepted them (packages locked at more than one "
+              "version are not re-applied).\n"
+            + "".join(f"{lk}: cargo refused to re-lock {n} {o} (kept {w}): {reason}\n"
+                      for lk, n, o, w, reason in refused)
         )
         run("git", "add", "-A")
         run(
