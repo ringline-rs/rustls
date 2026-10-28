@@ -194,7 +194,7 @@ def restore_bumps(lock, manifest, forked):
     The lock is re-read before each re-lock, since one can move another
     package. Packages locked at several versions are left alone. Returns the
     re-locks cargo refused, as (lock, name, fork version, kept version,
-    cargo's last error line)."""
+    cargo's first `error:` line, or its last line when there is none)."""
     refused = []
     for name, old in forked.items():
         new = locked_versions(lock).get(name, [])
@@ -206,7 +206,9 @@ def restore_bumps(lock, manifest, forked):
                                 "-p", f"{name}@{new[0]}", "--precise", old[0]], capture_output=True)
             if r.returncode != 0:
                 lines = r.stderr.decode(errors="replace").strip().splitlines()
-                refused.append((lock, name, old[0], new[0], lines[-1] if lines else "no error output"))
+                errors = [x for x in lines if x.startswith("error:")]
+                reason = errors[0] if errors else (lines[-1] if lines else "no error output")
+                refused.append((lock, name, old[0], new[0], reason))
     return refused
 
 
