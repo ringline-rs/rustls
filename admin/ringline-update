@@ -218,6 +218,9 @@ def main():
     ap.add_argument("--push", action="store_true", help="push the branch and open a pull request or issue")
     ap.add_argument("--security", action="store_true", help="an advisory started this run")
     opts = ap.parse_args()
+    # Plain cargo output: the reasons quoted in issues and pull requests are
+    # read from it. CI sets CARGO_TERM_COLOR=always.
+    os.environ["CARGO_TERM_COLOR"] = "never"
 
     base_branch = run("git", "rev-parse", "--abbrev-ref", "HEAD")
     if opts.push and opts.security:
