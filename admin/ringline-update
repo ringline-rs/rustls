@@ -77,9 +77,12 @@ def newest_on_line(upstream_url, current):
     return max(newer, key=version_tuple) if newer else None
 
 
-def renamed_tree(tag, version):
-    """A temporary worktree at `tag` with admin/ringline-apply-rename applied."""
+def renamed_tree(tag, version, trees):
+    """A temporary worktree at `tag` with admin/ringline-apply-rename applied.
+    It is appended to `trees` before anything can fail, for the caller to
+    remove."""
     tmp = tempfile.mkdtemp(prefix="ringline-update-")
+    trees.append(tmp)
     run("git", "worktree", "add", "--quiet", "--detach", tmp, f"refs/tags/{tag}")
     os.makedirs(os.path.join(tmp, "admin"), exist_ok=True)
     shutil.copy("admin/ringline-apply-rename", os.path.join(tmp, "admin"))
@@ -94,10 +97,8 @@ def resolve(paths, old_tag, new_tag, version):
         return {}
     trees = []
     try:
-        old = renamed_tree(old_tag, version)
-        trees.append(old)
-        new = renamed_tree(new_tag, version)
-        trees.append(new)
+        old = renamed_tree(old_tag, version, trees)
+        new = renamed_tree(new_tag, version, trees)
         merged = {}
         for p in paths:
             ours = subprocess.run(["git", "show", f"HEAD:{p}"], capture_output=True)
@@ -117,6 +118,7 @@ def resolve(paths, old_tag, new_tag, version):
         for t in trees:
             run("git", "worktree", "remove", "--force", t, check=False)
             shutil.rmtree(t, ignore_errors=True)
+        run("git", "worktree", "prune", check=False)
 
 
 def advisory_ids(version):
