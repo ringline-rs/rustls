@@ -17,12 +17,16 @@ function run_clippy() {
 }
 
 # because examples enable rustls' features, `--workspace --no-default-features` is not
-# the same as `--package rustls --no-default-features` so run it separately
-run_clippy --package rustls --no-default-features --all-targets
+# the same as `--package ringline-tls --no-default-features` so run it separately
+run_clippy --package ringline-tls --no-default-features --all-targets
 
 # run all workspace members (individually, because we don't want feature unification)
 for p in $(admin/all-workspace-members) ; do
   case "$p" in
+    rustls-bench)
+      # rustls-graviola implements upstream rustls's traits, not ringline-tls's
+      ALL_FEATURES="--features aws-lc-rs,fips,post-quantum,ring"
+      ;;
     *)
       ALL_FEATURES="--all-features"
       ;;

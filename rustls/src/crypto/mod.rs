@@ -171,7 +171,6 @@ pub use crate::suites::CipherSuiteCommon;
 /// Content-Type: text/html; charset=utf-8
 /// Content-Length: 19899
 /// ```
-/// # extern crate ringline_tls as rustls;
 ///
 /// [`provider-example/`]: https://github.com/rustls/rustls/tree/main/provider-example/
 /// [`RustCrypto`]: https://github.com/RustCrypto
@@ -678,7 +677,6 @@ impl From<Vec<u8>> for SharedSecret {
 ///     .expect("default provider already set elsewhere");
 /// # }
 /// ```
-/// # extern crate ringline_tls as rustls;
 ///
 /// You can also use this explicitly, like:
 ///

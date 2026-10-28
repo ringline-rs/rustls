@@ -1,8 +1,9 @@
 //! Bytes copied per plaintext byte on the unbuffered send and receive paths,
 //! measured by `src/main.rs` with the memcpy/memmove counting shim in
 //! `LD_PRELOAD`. The bounds are what ringline-tls does today; a change or an
-//! upstream merge that adds a copy fails here. Lower a bound when a change
-//! removes a copy.
+//! upstream merge that adds a memcpy or memmove of 256 bytes or more fails
+//! here. A copy done another way, such as a loop over the bytes, is not
+//! counted. Lower a bound when a change removes a copy.
 //!
 //! rustls 0.23.46, measured on aarch64 Linux: send 2.02 at 1 KiB records and
 //! 2.00 at 16 KiB (the `PrefixedPayload` copy and the copy of the sealed
@@ -32,6 +33,7 @@ fn bytes_copied_per_plaintext_byte() {
         String::from_utf8_lossy(&output.stderr)
     );
 
+    let mut controls = 0;
     let mut sends = 0;
     let mut recvs = 0;
     for line in stdout.lines() {
@@ -45,6 +47,7 @@ fn bytes_copied_per_plaintext_byte() {
                     ("2", "32768"),
                     "the shim counts a known pair of copies"
                 );
+                controls += 1;
             }
             ["send", record, ratio] => {
                 let ratio: f64 = ratio.parse().unwrap();
@@ -67,5 +70,10 @@ fn bytes_copied_per_plaintext_byte() {
             _ => panic!("unexpected output line: {line}"),
         }
     }
-    assert_eq!((sends, recvs), (3, 3), "one line per record size:\n{stdout}");
+    assert_eq!(
+        (controls, sends, recvs),
+        (1, 3, 3),
+        "one control line and one line per record size:
+{stdout}"
+    );
 }

@@ -10,6 +10,9 @@ reports nothing means the check itself is broken.
 
 Exit status: 0 no advisory; 1 an advisory affects the merged upstream
 version (the IDs are printed); 2 the check is broken.
+
+`--ids VERSION` prints the advisory IDs against that rustls version and
+exits 0.
 """
 
 import json
@@ -50,6 +53,11 @@ def audit(version, workdir):
 
 
 def main():
+    if len(sys.argv) == 3 and sys.argv[1] == "--ids":
+        # The advisory IDs against one rustls version, for admin/ringline-update.
+        with tempfile.TemporaryDirectory() as d:
+            print(" ".join(audit(sys.argv[2], d)))
+        return
     version = upstream_version()
     with tempfile.TemporaryDirectory() as d:
         control = audit(CONTROL_VERSION, d)

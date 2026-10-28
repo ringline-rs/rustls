@@ -131,7 +131,6 @@
 //!                     |                       |
 //!     write_tls()     +-----------------------+      writer() as io::Write
 //! ```
-//! # extern crate ringline_tls as rustls;
 //!
 //! ### Rustls takes care of server certificate verification
 //! You do not need to provide anything other than a set of root certificates to trust.
@@ -154,7 +153,6 @@
 //! );
 //! # }
 //! ```
-//! # extern crate ringline_tls as rustls;
 //!
 //! [`webpki_roots`]: https://crates.io/crates/webpki-roots
 //!
@@ -170,7 +168,6 @@
 //!     .with_no_client_auth();
 //! # }
 //! ```
-//! # extern crate ringline_tls as rustls;
 //!
 //! Now we can make a connection.  You need to provide the server's hostname so we
 //! know what to expect to find in the server's certificate.
@@ -195,7 +192,6 @@
 //! let mut client = rustls::ClientConnection::new(rc_config, example_com);
 //! # }
 //! ```
-//! # extern crate ringline_tls as rustls;
 //!
 //! Now you should do appropriate IO for the `client` object.  If `client.wants_read()` yields
 //! true, you should call `client.read_tls()` when the underlying connection has data.
@@ -266,7 +262,6 @@
 //! }
 //! # }
 //! ```
-//! # extern crate ringline_tls as rustls;
 //!
 //! # Examples
 //!

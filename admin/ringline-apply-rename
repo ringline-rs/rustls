@@ -2,20 +2,25 @@
 """Apply the fork's mechanical changes to an upstream rustls tree.
 
 Run from the repository root. Idempotent: running it on a tree that already
-has the changes leaves it unchanged. The upstream-merge workflow resolves a
-conflict in the files listed in MECHANICAL by taking upstream's version and
-running this script.
+has the changes leaves it unchanged. admin/ringline-update resolves a
+conflicted file by taking upstream's version and running this script, when
+the fork's copy of that file is exactly what this script makes of the old
+upstream copy.
 
 The changes:
 - rustls/Cargo.toml: package `ringline-tls` at the fork's version, library
   `ringline_tls`, fork metadata, RINGLINE.md as the README.
-- Workspace members depend on the package under the key `rustls`.
+- Every member (and fuzz/) that depends on ../rustls does so under the key
+  `rustls`, naming the package `ringline-tls`.
 - rustls-post-quantum is not published.
 - The root [patch.crates-io] entry for `rustls` is removed.
 - The root `webpki` requirement is at least WEBPKI_FLOOR.
 - copy-count/ is a workspace member.
 - The package's test, bench and example roots, and every doctest that names
   `rustls`, alias the library as `rustls`.
+- admin/clippy, admin/coverage and the workflows name the package
+  `ringline-tls`; admin/clippy leaves out rustls-bench's `graviola` feature,
+  whose crate implements upstream rustls's traits.
 
 Usage: admin/ringline-apply-rename [--version X.Y.Z]
 """
@@ -30,21 +35,19 @@ WEBPKI_FLOOR_COMMENT = (
     "# ringline-tls: >= 0.103.16 for RUSTSEC-2026-0382 (certificate verification\n"
     "# may accept distrusted intermediates). Upstream 0.23.46 requires 0.103.14.\n"
 )
-MEMBERS = [
-    "examples",
-    "provider-example",
-    "bogo",
-    "openssl-tests",
-    "connect-tests",
-    "ci-bench",
-    "fuzz",
-    "rustls-test",
-    "rustls-bench",
-    "rustls-fuzzing-provider",
-    "rustls-post-quantum",
-    "rustls-provider-test",
-]
-MECHANICAL = ["Cargo.toml", "rustls/Cargo.toml"] + [f"{m}/Cargo.toml" for m in MEMBERS]
+def members():
+    """Workspace directories (and fuzz/) whose manifest depends on ../rustls."""
+    found = []
+    for d in sorted(os.listdir(".")):
+        p = os.path.join(d, "Cargo.toml")
+        if d != "rustls" and os.path.isfile(p) and re.search(r'^rustls = \{.*path = "\.\./rustls"', read(p), re.M):
+            found.append(d)
+    return found
+
+
+# Files outside the manifests whose `rustls` package names are rewritten.
+SCRIPTS = ["admin/clippy", "admin/coverage"]
+WORKFLOWS_DIR = ".github/workflows"
 ALIAS = "extern crate ringline_tls as rustls;"
 ALIAS_COMMENT = [
     "// This fork names its library `ringline_tls`; tests and benches keep the",
@@ -97,10 +100,8 @@ def package_manifest(version):
 
 
 def member_manifests():
-    for m in MEMBERS:
+    for m in members():
         p = f"{m}/Cargo.toml"
-        if not os.path.exists(p):
-            continue
         s = read(p)
         # `rustls = { ... path = "../rustls" ... }`: name the package, drop a
         # version requirement (the fork's versions are not upstream's).
@@ -196,41 +197,86 @@ def alias_doctests():
             out, i = [], 0
             while i < len(lines):
                 m = fence.match(lines[i])
-                if m:
-                    prefix = m.group(1)
-                    langs = [x.strip() for x in m.group(2).split(",") if x.strip()]
-                    j = i + 1
-                    while j < len(lines) and not close.match(lines[j]):
-                        j += 1
-                    body = "\n".join(lines[i + 1:j])
-                    rust = all(
-                        x in ("rust", "no_run", "should_panic", "compile_fail") or x.startswith("edition")
-                        for x in langs
-                    )
-                    names_rustls = re.search(r"\brustls::|use rustls\b", body)
-                    if rust and names_rustls and DOCTEST_ALIAS not in body:
-                        out.append(lines[i])
-                        out.append(prefix + DOCTEST_ALIAS)
-                        i += 1
-                        continue
+                if not m:
+                    out.append(lines[i])
+                    i += 1
+                    continue
+                prefix = m.group(1)
+                langs = [x.strip() for x in m.group(2).split(",") if x.strip()]
+                j = i + 1
+                while j < len(lines) and not close.match(lines[j]):
+                    j += 1
+                body = "\n".join(lines[i + 1:j])
+                rust = all(
+                    x in ("rust", "no_run", "should_panic", "compile_fail") or x.startswith("edition")
+                    for x in langs
+                )
+                names_rustls = re.search(r"\brustls::|use rustls\b", body)
                 out.append(lines[i])
-                i += 1
+                if rust and names_rustls and DOCTEST_ALIAS not in body:
+                    out.append(prefix + DOCTEST_ALIAS)
+                # The block, through its closing fence, is copied as is; the
+                # closing fence must not be read as an opening one.
+                out.extend(lines[i + 1:j + 1])
+                i = j + 1
             write(p, "\n".join(out))
+
+
+def rename_package_args(text):
+    text = re.sub(r"(-p|--package) rustls(?=[\s)]|$)", r"\1 ringline-tls", text, flags=re.M)
+    text = re.sub(r"(all-features-except [\w,-]+) rustls\)", r"\1 ringline-tls)", text)
+    return text
+
+
+CLIPPY_BENCH_CASE = """    rustls-bench)
+      # rustls-graviola implements upstream rustls's traits, not ringline-tls's
+      ALL_FEATURES="--features aws-lc-rs,fips,post-quantum,ring"
+      ;;
+"""
+
+
+def scripts_and_workflows():
+    paths = [p for p in SCRIPTS if os.path.exists(p)]
+    if os.path.isdir(WORKFLOWS_DIR):
+        paths += [os.path.join(WORKFLOWS_DIR, f) for f in sorted(os.listdir(WORKFLOWS_DIR)) if f.endswith(".yml")]
+    for p in paths:
+        s = rename_package_args(read(p))
+        if p == "admin/clippy" and "rustls-bench)" not in s:
+            s = s.replace('  case "$p" in\n', '  case "$p" in\n' + CLIPPY_BENCH_CASE, 1)
+        write(p, s)
+
+
+def check_doctest_aliases():
+    """Fail if an alias line is outside a code block, where rustdoc would
+    render it as a heading."""
+    fence = re.compile(r"^\s*//[/!]\s?```")
+    bad = []
+    for root, _, files in os.walk("rustls/src"):
+        for f in files:
+            if not f.endswith(".rs"):
+                continue
+            p = os.path.join(root, f)
+            inside = False
+            for n, line in enumerate(read(p).split("\n"), 1):
+                if fence.match(line):
+                    inside = not inside
+                elif DOCTEST_ALIAS in line and not inside:
+                    bad.append(f"{p}:{n}")
+    if bad:
+        sys.exit("alias lines outside a code block:\n" + "\n".join(bad))
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--version", help="set the ringline-tls package version")
-    ap.add_argument("--list-mechanical", action="store_true", help="print the files a merge may resolve with this script")
     opts = ap.parse_args()
-    if opts.list_mechanical:
-        print("\n".join(MECHANICAL))
-        return
     package_manifest(opts.version)
     member_manifests()
     root_manifest()
     alias_roots()
     alias_doctests()
+    scripts_and_workflows()
+    check_doctest_aliases()
 
 
 if __name__ == "__main__":

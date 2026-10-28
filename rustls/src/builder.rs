@@ -43,7 +43,6 @@ use crate::{ClientConfig, ServerConfig};
 /// # ;
 /// # }
 /// ```
-/// # extern crate ringline_tls as rustls;
 ///
 /// You may also override the choice of protocol versions:
 ///
@@ -95,7 +94,6 @@ use crate::{ClientConfig, ServerConfig};
 ///     .with_no_client_auth();
 /// # }
 /// ```
-/// # extern crate ringline_tls as rustls;
 ///
 /// # ServerConfig certificate configuration
 ///

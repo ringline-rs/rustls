@@ -825,7 +825,6 @@ mod connection {
     /// # }
     /// # }
     /// ```
-    /// # extern crate ringline_tls as rustls;
     pub struct Acceptor {
         inner: Option<ConnectionCommon<ServerConnectionData>>,
     }

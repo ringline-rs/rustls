@@ -166,7 +166,10 @@ fn main() {
             copied += m[1] + m[3];
             wire.extend_from_slice(&out[..n]);
         }
-        println!("send {record} {:.4}", copied as f64 / plaintext.len() as f64);
+        println!(
+            "send {record} {:.4}",
+            copied as f64 / plaintext.len() as f64
+        );
 
         // Receive: every record is already in the incoming buffer. The
         // `drain` that discards processed records runs outside the meter.
