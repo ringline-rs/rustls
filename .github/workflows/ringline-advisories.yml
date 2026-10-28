@@ -1,0 +1,44 @@
+# Checks the RustSec database for advisories against the upstream rustls
+# release this fork contains (`Upstream:` in RINGLINE.md). `cargo audit` on
+# a lockfile never reports ringline-tls, because it matches by crate name.
+# An advisory fails this job and starts ringline-update with --security.
+name: ringline advisories
+
+on:
+  schedule:
+    - cron: '30 6 * * *'
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - RINGLINE.md
+      - admin/ringline-advisory-check
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  advisories:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-audit
+        uses: taiki-e/cache-cargo-install-action@v3
+        with:
+          tool: cargo-audit
+      - name: Check advisories
+        id: check
+        run: |
+          set +e
+          admin/ringline-advisory-check
+          status=$?
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          exit $status
+      - name: Start the upstream update
+        if: failure() && steps.check.outputs.status == '1' && github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run ringline-update.yml --ref "${{ github.ref_name }}" -f security=true

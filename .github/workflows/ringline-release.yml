@@ -1,0 +1,42 @@
+# Publishes ringline-tls to crates.io when a `vX.Y.Z` tag is pushed (the
+# fork's own versions; upstream's tags are `v/X.Y.Z`), and creates a GitHub
+# release whose notes name the upstream tag. Needs the CARGO_REGISTRY_TOKEN
+# secret.
+name: ringline release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Check the tag matches the package version
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' rustls/Cargo.toml | head -1)
+          if [ "v$version" != "${{ github.ref_name }}" ]; then
+            echo "::error::tag ${{ github.ref_name }} does not match ringline-tls $version"
+            exit 1
+          fi
+      - name: Publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish --locked -p ringline-tls
+      - name: Release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          upstream=$(sed -n 's/^Upstream: \(.*\)$/\1/p' RINGLINE.md)
+          gh release create "${{ github.ref_name }}" --title "ringline-tls ${{ github.ref_name }}" \
+            --notes "Upstream: $upstream
+
+          rustls changes: https://github.com/rustls/rustls/releases/tag/$upstream"

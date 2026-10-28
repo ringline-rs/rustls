@@ -1,0 +1,53 @@
+# Merges the newest upstream rustls release on this branch's line and opens a
+# pull request (or an issue, when files holding ringline changes conflict).
+# See admin/ringline-update.
+#
+# It authenticates as a GitHub App so the pull request's checks run: a pull
+# request opened with the default GITHUB_TOKEN triggers no workflows. The App
+# needs contents, pull requests and issues (read and write) on this
+# repository; set the repository variable RINGLINE_APP_ID and the secret
+# RINGLINE_APP_PRIVATE_KEY.
+name: ringline update
+
+on:
+  schedule:
+    - cron: '0 7 * * *'
+  workflow_dispatch:
+    inputs:
+      security:
+        description: Label the pull request as a security fix
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check the GitHub App is configured
+        run: |
+          if [ -z "${{ vars.RINGLINE_APP_ID }}" ]; then
+            echo "::error::Set the RINGLINE_APP_ID variable and RINGLINE_APP_PRIVATE_KEY secret (see this workflow's header)."
+            exit 1
+          fi
+      - uses: actions/create-github-app-token@v2
+        id: app
+        with:
+          app-id: ${{ vars.RINGLINE_APP_ID }}
+          private-key: ${{ secrets.RINGLINE_APP_PRIVATE_KEY }}
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ steps.app.outputs.token }}
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Merge upstream
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+        run: |
+          git config user.name "ringline-rs update"
+          git config user.email "noreply@github.com"
+          args="--push"
+          if [ "${{ inputs.security }}" = "true" ]; then args="$args --security"; fi
+          admin/ringline-update $args
