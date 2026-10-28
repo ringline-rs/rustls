@@ -12,14 +12,17 @@ example ringline/0.23). The script:
    upstream copies have first been put through admin/ringline-apply-rename:
    `git merge-file <fork copy> <apply-rename(old upstream)>
    <apply-rename(new upstream)>`. The fork's mechanical changes then match on
-   both sides, so only its other changes can conflict. A file whose merge
-   still conflicts is left to a person: the merge is abandoned and an issue
-   names the files.
+   both sides, so only its other changes can conflict. A file upstream
+   deleted, which the fork changed only mechanically, is deleted. A file
+   whose merge still conflicts is left to a person: the merge is abandoned
+   and an issue names the files.
 4. Runs admin/ringline-apply-rename with the next patch version, updates the
    lockfiles with `cargo update --workspace` (starting from upstream's copy
-   when one conflicted, then restoring any newer compatible version the
-   fork had locked), updates the `Upstream:` line, and commits. A file
-   upstream deleted, which the fork changed only mechanically, is deleted.
+   when one conflicted), and re-locks each package the fork had moved away
+   from the old upstream lockfile, when the fork's version is newer than and
+   compatible with the new one. A re-lock that cargo refuses is listed in
+   the commit and the pull request. Then it updates the `Upstream:` line and
+   commits.
 5. With --push, pushes the branch and opens a pull request. It names the
    advisories the release fixes when cargo-audit is installed.
 
@@ -154,15 +157,23 @@ def open_issue(title, body, push, security):
         gh(*args)
 
 
-def locked_versions(lockfile):
-    """{name: [versions]} from a Cargo.lock, or {} if absent."""
-    if not os.path.exists(lockfile):
-        return {}
-    data = tomllib.loads(open(lockfile).read())
+def lock_versions(text):
+    """{name: [versions]} from the text of a Cargo.lock."""
     out = {}
-    for pkg in data.get("package", []):
+    for pkg in tomllib.loads(text).get("package", []):
         out.setdefault(pkg["name"], []).append(pkg["version"])
     return out
+
+
+def lock_at(rev, path):
+    """{name: [versions]} from `path` at git revision `rev`, or {} if absent."""
+    r = subprocess.run(["git", "show", f"{rev}:{path}"], capture_output=True, text=True)
+    return lock_versions(r.stdout) if r.returncode == 0 else {}
+
+
+def locked_versions(lockfile):
+    """{name: [versions]} from a Cargo.lock in the working tree, or {}."""
+    return lock_versions(open(lockfile).read()) if os.path.exists(lockfile) else {}
 
 
 def compatible(a, b):
@@ -176,18 +187,24 @@ def compatible(a, b):
     return va == vb
 
 
-def restore_bumps(manifest, before, after):
-    """Re-apply versions the fork had locked (`before`) that are newer than,
-    and compatible with, what the update resolved (`after`). Packages locked
-    at several versions are left alone."""
-    for name, old in before.items():
+def restore_bumps(manifest, forked, after):
+    """Re-lock the packages the fork moved (`forked`: {name: [versions]},
+    only packages whose fork lock differs from the old upstream lock) where
+    the fork's version is newer than, and compatible with, what the update
+    resolved (`after`). Packages locked at several versions are left alone.
+    Returns the re-locks cargo refused, as (name, fork version, new version)."""
+    refused = []
+    for name, old in forked.items():
         new = after.get(name, [])
         if len(old) != 1 or len(new) != 1 or old[0] == new[0]:
             continue
         if compatible(old[0], new[0]) and version_tuple(re.match(r"[\d.]+\d", old[0]).group()) > \
                 version_tuple(re.match(r"[\d.]+\d", new[0]).group()):
-            run("cargo", "update", "--quiet", "--manifest-path", manifest,
-                "-p", f"{name}@{new[0]}", "--precise", old[0], check=False)
+            r = subprocess.run(["cargo", "update", "--quiet", "--manifest-path", manifest,
+                                "-p", f"{name}@{new[0]}", "--precise", old[0]], capture_output=True)
+            if r.returncode != 0:
+                refused.append((name, old[0], new[0]))
+    return refused
 
 
 def main():
@@ -270,31 +287,40 @@ def main():
             else:
                 with open(f, "wb") as out:
                     out.write(content)
-        locked_before = {}
+        # The packages the fork moved in each lockfile: HEAD's locks that
+        # differ from the old upstream tag's.
+        forked = {}
         for f in LOCKFILES:
-            ours = subprocess.run(["git", "show", f"HEAD:{f}"], capture_output=True, text=True)
-            if ours.returncode == 0:
-                data = tomllib.loads(ours.stdout)
-                locked_before[f] = {}
-                for pkg in data.get("package", []):
-                    locked_before[f].setdefault(pkg["name"], []).append(pkg["version"])
+            upstream_before = lock_at(f"refs/tags/v/{current}", f)
+            forked[f] = {n: v for n, v in lock_at("HEAD", f).items() if upstream_before.get(n) != v}
         for f in conflicts:
             if f in LOCKFILES:
                 run("git", "checkout", "--theirs", "--", f)
         run("python3", "admin/ringline-apply-rename", "--version", next_version)
         text = open("RINGLINE.md").read()
         open("RINGLINE.md", "w").write(re.sub(r"^Upstream: v/\S+$", f"Upstream: {tag}", text, flags=re.M))
+        refused = []
         for lock, manifest in LOCKFILES.items():
             if os.path.exists(manifest):
                 run("cargo", "update", "--quiet", "--workspace", "--manifest-path", manifest)
-                restore_bumps(manifest, locked_before.get(lock, {}), locked_versions(lock))
+                refused += restore_bumps(manifest, forked.get(lock, {}), locked_versions(lock))
+        merged_files = [f for f in candidates if merged.get(f) is not None]
+        deleted_files = [f for f in candidates if f in merged and merged[f] is None]
+        report = (
+            (f"Conflicts merged after admin/ringline-apply-rename: {', '.join(merged_files)}\n"
+             if merged_files else "")
+            + (f"Deleted upstream, fork changes mechanical only: {', '.join(deleted_files)}\n"
+               if deleted_files else "")
+            + "Lockfiles updated with cargo update --workspace; the fork's newer compatible "
+              "locks restored.\n"
+            + "".join(f"Fork lock not kept (upstream's requirements exclude it): {n} {o} (now {w})\n"
+                      for n, o, w in refused)
+        )
         run("git", "add", "-A")
         run(
             "git", "commit", "--quiet", "-m",
             f"Merge upstream rustls {tag}; ringline-tls {next_version}\n\n"
-            f"Upstream: {tag}\n"
-            + (f"Conflicts merged after admin/ringline-apply-rename: {', '.join(candidates)}\n" if candidates else "")
-            + "Lockfiles regenerated with cargo update --workspace.\n",
+            f"Upstream: {tag}\n" + report,
         )
     except Exception as e:
         run("git", "merge", "--abort", check=False)
@@ -320,8 +346,7 @@ def main():
         f"Merges upstream rustls `{tag}` into `{base_branch}` and sets ringline-tls "
         f"{next_version}.\n\nUpstream: {tag}\n\n"
         + advisories
-        + (f"Conflicts merged after `admin/ringline-apply-rename`: {', '.join(f'`{c}`' for c in candidates)}.\n\n"
-           if candidates else "")
+        + report + "\n"
         + f"Upstream changes: https://github.com/rustls/rustls/compare/v/{current}...{tag}\n\n"
         "Merge with a merge commit, not a squash. A squash leaves the upstream tag out of the "
         "branch's history, so the next update's merge uses the previous upstream tag as its "
