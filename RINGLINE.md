@@ -25,6 +25,9 @@ schedule. The design is in ringline's
   a new minor version (0.2.0, ...).
 - The `Upstream:` line above names the upstream tag this version contains.
   Each release's notes carry the same line.
+- Upstream releases arrive as pull requests from `admin/ringline-update`.
+  Merge them with a merge commit, not a squash: the next update merges from
+  the upstream tag's commit, which a squash would drop.
 
 ## Using it
 
@@ -44,7 +47,9 @@ rustls = { package = "ringline-tls", version = "0.1" }
 ```
 
 Crates that implement upstream rustls's traits, such as
-`rustls-platform-verifier`, work with upstream rustls only.
+`rustls-platform-verifier`, work with upstream rustls only. So do crates
+that take rustls types, such as `tokio-rustls`, `hyper-rustls` and `quinn`:
+they do not accept a `ringline_tls` config.
 
 ## Security
 

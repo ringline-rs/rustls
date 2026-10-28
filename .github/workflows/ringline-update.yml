@@ -4,9 +4,13 @@
 #
 # It authenticates as a GitHub App so the pull request's checks run: a pull
 # request opened with the default GITHUB_TOKEN triggers no workflows. The App
-# needs contents, pull requests and issues (read and write) on this
-# repository; set the repository variable RINGLINE_APP_ID and the secret
-# RINGLINE_APP_PRIVATE_KEY.
+# needs contents, pull requests, issues and workflows (read and write) on
+# this repository; workflows because upstream releases change files under
+# .github/workflows. Set the repository variable RINGLINE_APP_ID and the
+# secret RINGLINE_APP_PRIVATE_KEY.
+#
+# `branch` lists the ringline branches to update, one per upstream line a
+# maintained ringline-tls minor version uses.
 name: ringline update
 
 on:
@@ -25,6 +29,10 @@ permissions:
 jobs:
   update:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        branch: ['ringline/0.23']
     steps:
       - name: Check the GitHub App is configured
         run: |
@@ -40,8 +48,13 @@ jobs:
       - uses: actions/checkout@v4
         with:
           token: ${{ steps.app.outputs.token }}
+          ref: ${{ matrix.branch }}
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-audit
+        uses: taiki-e/cache-cargo-install-action@v3
+        with:
+          tool: cargo-audit
       - name: Merge upstream
         env:
           GH_TOKEN: ${{ steps.app.outputs.token }}
