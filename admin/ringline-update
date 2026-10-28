@@ -8,10 +8,13 @@ example ringline/0.23). The script:
    the newest `v/0.23.*` tag at UPSTREAM. Moving to another line (0.24) is
    done by hand.
 2. Merges that tag into a new branch, `ringline-update/0.23.M`.
-3. Resolves a conflicted file by taking upstream's version, when the fork's
-   copy is exactly what admin/ringline-apply-rename makes of the old
-   upstream copy, so the fork has no other change in it. Any other conflict
-   is left to a person: the merge is abandoned and an issue names the files.
+3. Resolves each conflicted file with a three-way merge in which both
+   upstream copies have first been put through admin/ringline-apply-rename:
+   `git merge-file <fork copy> <apply-rename(old upstream)>
+   <apply-rename(new upstream)>`. The fork's mechanical changes then match on
+   both sides, so only its other changes can conflict. A file whose merge
+   still conflicts is left to a person: the merge is abandoned and an issue
+   names the files.
 4. Runs admin/ringline-apply-rename with the next patch version, regenerates
    Cargo.lock and fuzz/Cargo.lock from upstream's with
    `cargo update --workspace`, updates the `Upstream:` line, and commits.
@@ -19,7 +22,7 @@ example ringline/0.23). The script:
    advisories the release fixes when cargo-audit is installed.
 
 A failure after the merge also opens an issue. Nothing is done twice: an
-existing pull request for the release (labelled `security` under
+open pull request for the release (labelled `security` under
 --security) or an open issue with the same title stops the run. Under
 --security with no newer upstream release, an issue asks for a backport.
 
@@ -42,8 +45,8 @@ class Failed(Exception):
     pass
 
 
-def run(*args, check=True):
-    r = subprocess.run(args, capture_output=True, text=True)
+def run(*args, check=True, cwd=None):
+    r = subprocess.run(args, capture_output=True, text=True, cwd=cwd)
     if check and r.returncode != 0:
         raise Failed(f"`{' '.join(args)}` failed:\n{r.stdout}{r.stderr}")
     return r.stdout.strip()
@@ -74,30 +77,46 @@ def newest_on_line(upstream_url, current):
     return max(newer, key=version_tuple) if newer else None
 
 
-def mechanical_files(paths, old_tag, version):
-    """The paths whose fork copy (at HEAD) equals admin/ringline-apply-rename's
-    output on the `old_tag` tree."""
-    if not paths:
-        return set()
+def renamed_tree(tag, version):
+    """A temporary worktree at `tag` with admin/ringline-apply-rename applied."""
     tmp = tempfile.mkdtemp(prefix="ringline-update-")
+    run("git", "worktree", "add", "--quiet", "--detach", tmp, f"refs/tags/{tag}")
+    os.makedirs(os.path.join(tmp, "admin"), exist_ok=True)
+    shutil.copy("admin/ringline-apply-rename", os.path.join(tmp, "admin"))
+    run("python3", "admin/ringline-apply-rename", "--version", version, cwd=tmp)
+    return tmp
+
+
+def resolve(paths, old_tag, new_tag, version):
+    """Three-way merge each path with both upstream copies renamed. Returns
+    {path: merged bytes} for the paths that merged cleanly."""
+    if not paths:
+        return {}
+    trees = []
     try:
-        run("git", "worktree", "add", "--quiet", "--detach", tmp, f"refs/tags/{old_tag}")
-        os.makedirs(os.path.join(tmp, "admin"), exist_ok=True)
-        shutil.copy("admin/ringline-apply-rename", os.path.join(tmp, "admin"))
-        subprocess.run(
-            ["python3", "admin/ringline-apply-rename", "--version", version],
-            cwd=tmp, check=True, capture_output=True,
-        )
-        same = set()
+        old = renamed_tree(old_tag, version)
+        trees.append(old)
+        new = renamed_tree(new_tag, version)
+        trees.append(new)
+        merged = {}
         for p in paths:
-            old = os.path.join(tmp, p)
             ours = subprocess.run(["git", "show", f"HEAD:{p}"], capture_output=True)
-            if os.path.exists(old) and ours.returncode == 0 and open(old, "rb").read() == ours.stdout:
-                same.add(p)
-        return same
+            base, theirs = os.path.join(old, p), os.path.join(new, p)
+            if ours.returncode != 0 or not os.path.exists(base) or not os.path.exists(theirs):
+                continue
+            with tempfile.NamedTemporaryFile(delete=False) as f:
+                f.write(ours.stdout)
+            try:
+                r = subprocess.run(["git", "merge-file", "-p", f.name, base, theirs], capture_output=True)
+            finally:
+                os.unlink(f.name)
+            if r.returncode == 0:
+                merged[p] = r.stdout
+        return merged
     finally:
-        run("git", "worktree", "remove", "--force", tmp, check=False)
-        shutil.rmtree(tmp, ignore_errors=True)
+        for t in trees:
+            run("git", "worktree", "remove", "--force", t, check=False)
+            shutil.rmtree(t, ignore_errors=True)
 
 
 def advisory_ids(version):
@@ -157,9 +176,12 @@ def main():
                 gh("pr", "edit", existing.split()[0], "--add-label", "security")
             print(f"pull request #{existing.split()[0]} for {branch} is open")
             return
-        if gh("issue", "list", "--search", f'"{title}" in:title', "--state", "open",
-              "--json", "number", "--jq", "length") != "0":
-            print(f"an open issue for {tag} exists")
+        issue = gh("issue", "list", "--search", f'"{title}" in:title', "--state", "open",
+                   "--json", "number", "--jq", ".[0].number // empty")
+        if issue:
+            if opts.security:
+                gh("issue", "edit", issue, "--add-label", "security")
+            print(f"issue #{issue} for {tag} is open")
             return
 
     # The fork's version, read before a conflict replaces the manifest.
@@ -175,8 +197,8 @@ def main():
         if merge.returncode != 0 and not conflicts:
             raise Failed(f"git merge failed:\n{merge.stdout}{merge.stderr}")
         candidates = [f for f in conflicts if f not in LOCKFILES]
-        mechanical = mechanical_files(candidates, f"v/{current}", version)
-        other = [f for f in candidates if f not in mechanical]
+        merged = resolve(candidates, f"v/{current}", tag, version)
+        other = [f for f in candidates if f not in merged]
         if other:
             run("git", "merge", "--abort")
             run("git", "checkout", "--quiet", base_branch)
@@ -190,8 +212,12 @@ def main():
                 opts.push,
             )
             return
+        for f, content in merged.items():
+            with open(f, "wb") as out:
+                out.write(content)
         for f in conflicts:
-            run("git", "checkout", "--theirs", "--", f)
+            if f in LOCKFILES:
+                run("git", "checkout", "--theirs", "--", f)
         run("python3", "admin/ringline-apply-rename", "--version", next_version)
         text = open("RINGLINE.md").read()
         open("RINGLINE.md", "w").write(re.sub(r"^Upstream: v/\S+$", f"Upstream: {tag}", text, flags=re.M))
@@ -203,7 +229,8 @@ def main():
             "git", "commit", "--quiet", "-m",
             f"Merge upstream rustls {tag}; ringline-tls {next_version}\n\n"
             f"Upstream: {tag}\n"
-            + (f"Resolved with admin/ringline-apply-rename: {', '.join(conflicts)}\n" if conflicts else ""),
+            + (f"Conflicts merged after admin/ringline-apply-rename: {', '.join(candidates)}\n" if candidates else "")
+            + "Lockfiles regenerated with cargo update --workspace.\n",
         )
     except Failed as e:
         run("git", "merge", "--abort", check=False)
@@ -218,7 +245,7 @@ def main():
         return
     old_ids, new_ids = advisory_ids(current), advisory_ids(newest)
     if old_ids is None or new_ids is None:
-        advisories = "Advisories fixed: not checked (cargo-audit is not installed).\n\n"
+        advisories = "Advisories fixed: not checked (cargo-audit missing or the check failed).\n\n"
     elif old_ids - new_ids:
         advisories = f"Advisories fixed: {', '.join(sorted(old_ids - new_ids))}.\n\n"
     else:
@@ -228,11 +255,13 @@ def main():
         f"Merges upstream rustls `{tag}` into `{base_branch}` and sets ringline-tls "
         f"{next_version}.\n\nUpstream: {tag}\n\n"
         + advisories
-        + (f"Conflicts resolved with `admin/ringline-apply-rename`: {', '.join(f'`{c}`' for c in conflicts)}.\n\n"
-           if conflicts else "")
+        + (f"Conflicts merged after `admin/ringline-apply-rename`: {', '.join(f'`{c}`' for c in candidates)}.\n\n"
+           if candidates else "")
         + f"Upstream changes: https://github.com/rustls/rustls/compare/v/{current}...{tag}\n\n"
-        "Merge with a merge commit, not a squash: the next update merges from this one's "
-        f"upstream parent. Then tag the merge commit `v{next_version}` to publish."
+        "Merge with a merge commit, not a squash. A squash leaves the upstream tag out of the "
+        "branch's history, so the next update's merge uses the previous upstream tag as its "
+        "base and conflicts on everything upstream changed since. "
+        f"Then tag the merge commit `v{next_version}` to publish."
     )
     args = ["pr", "create", "--base", base_branch, "--head", branch, "--title", title, "--body", body]
     if opts.security:

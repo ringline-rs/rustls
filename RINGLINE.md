@@ -8,9 +8,10 @@ Upstream: v/0.23.46
 
 ## Why
 
-ringline changes the TLS record layer, for example to encrypt into and
-decrypt out of its own buffers, and releases those changes on its own
-schedule. The design is in ringline's
+ringline needs changes to the TLS record layer, for example to encrypt into
+and decrypt out of its own buffers. The fork carries them and releases them
+on its own schedule. 0.1.0 has none: it is rustls 0.23.46 renamed, with
+rustls-webpki 0.103.16 or later. The design is in ringline's
 [docs/rustls-quinn-forks-design.md](https://github.com/ringline-rs/ringline/blob/main/docs/rustls-quinn-forks-design.md).
 
 ## Branches and versions
@@ -26,8 +27,10 @@ schedule. The design is in ringline's
 - The `Upstream:` line above names the upstream tag this version contains.
   Each release's notes carry the same line.
 - Upstream releases arrive as pull requests from `admin/ringline-update`.
-  Merge them with a merge commit, not a squash: the next update merges from
-  the upstream tag's commit, which a squash would drop.
+  Merge them with a merge commit, not a squash. A squash leaves the upstream
+  tag out of the branch's history, so the next merge uses the previous
+  upstream tag as its base and conflicts on everything upstream changed
+  since.
 
 ## Using it
 
@@ -55,7 +58,7 @@ they do not accept a `ringline_tls` config.
 
 Fixes from upstream rustls are merged and released as patch versions. Report
 a vulnerability in upstream rustls to the rustls project (see
-[SECURITY.md](SECURITY.md)); report one in the fork's own changes to the
+[SECURITY.md](https://github.com/ringline-rs/rustls/blob/ringline/0.23/SECURITY.md)); report one in the fork's own changes to the
 ringline maintainers through GitHub's private vulnerability reporting on
 this repository.
 

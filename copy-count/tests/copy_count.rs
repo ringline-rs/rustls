@@ -1,8 +1,8 @@
 //! Bytes copied per plaintext byte on the unbuffered send and receive paths,
 //! measured by `src/main.rs` with the memcpy/memmove counting shim in
 //! `LD_PRELOAD`. The bounds are what ringline-tls does today; a change or an
-//! upstream merge that adds a memcpy or memmove of 256 bytes or more fails
-//! here. A copy done another way, such as a loop over the bytes, is not
+//! upstream merge that adds a per-record memcpy or memmove of 256 bytes or
+//! more, or another copy of the plaintext, fails here. A copy done another way, such as a loop over the bytes, is not
 //! counted. Lower a bound when a change removes a copy.
 //!
 //! rustls 0.23.46, measured on aarch64 Linux: send 2.02 at 1 KiB records and

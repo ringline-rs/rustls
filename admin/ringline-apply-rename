@@ -88,8 +88,7 @@ def package_manifest(version):
     head = set_key(
         head,
         "description",
-        '"A fork of rustls 0.23 maintained for ringline: the rustls TLS library with '
-        "ringline's record-layer patches.\"",
+        '"A fork of rustls 0.23 maintained for ringline."',
     )
     head = set_key(head, "homepage", '"https://github.com/ringline-rs/rustls"')
     head = set_key(head, "repository", '"https://github.com/ringline-rs/rustls"')
@@ -243,6 +242,8 @@ def scripts_and_workflows():
         s = rename_package_args(read(p))
         if p == "admin/clippy" and "rustls-bench)" not in s:
             s = s.replace('  case "$p" in\n', '  case "$p" in\n' + CLIPPY_BENCH_CASE, 1)
+            if "rustls-bench)" not in s:
+                sys.exit("admin/clippy: could not add the rustls-bench case")
         write(p, s)
 
 
