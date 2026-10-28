@@ -116,6 +116,10 @@ jobs:
       - name: cargo test (debug; rustls-provider-test; all features)
         run: cargo test --all-features -p rustls-provider-test
 
+      - name: cargo test (bytes copied per plaintext byte)
+        if: runner.os == 'Linux'
+        run: cargo test --locked -p ringline-tls-copy-count
+
       - name: cargo package --all-features -p ringline-tls
         run: cargo package --all-features -p ringline-tls
 

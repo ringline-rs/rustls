@@ -4,6 +4,8 @@ members = [
   "bogo",
   # CI benchmarks
   "ci-bench",
+  # ringline-tls: bytes copied per plaintext byte (Linux, LD_PRELOAD shim)
+  "copy-count",
   # Network-based tests
   "connect-tests",
   # tests and example code

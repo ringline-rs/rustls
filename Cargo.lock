@@ -2678,6 +2678,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ringline-tls-copy-count"
+version = "0.0.0"
+dependencies = [
+ "cc",
+ "libc",
+ "rcgen",
+ "ringline-tls",
+]
+
+[[package]]
 name = "rsa"
 version = "0.9.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
