@@ -69,7 +69,7 @@ macro_rules! step {
         let outgoing: &mut Vec<u8> = $outgoing;
         loop {
             let st = $conn.process_tls_records(&mut incoming[..]);
-            let discard = st.discard;
+            let mut discard = st.discard;
             let mut stop = false;
             let mut ready = false;
             match st.state.expect("TLS error") {
@@ -87,7 +87,11 @@ macro_rules! step {
                     ready = true;
                     stop = true;
                 }
-                ConnectionState::ReadTraffic(mut rt) => while rt.next_record().is_some() {},
+                ConnectionState::ReadTraffic(mut rt) => {
+                    while let Some(r) = rt.next_record() {
+                        discard += r.expect("record").discard;
+                    }
+                }
                 other => panic!("unexpected state {other:?}"),
             }
             incoming.drain(..discard);
@@ -180,11 +184,13 @@ fn main() {
         loop {
             meter.start();
             let st = client.process_tls_records(&mut to_client[..]);
-            let discard = st.discard;
+            let mut discard = st.discard;
             let mut more = false;
             if let ConnectionState::ReadTraffic(mut rt) = st.state.unwrap() {
                 while let Some(r) = rt.next_record() {
-                    received += r.unwrap().payload.len();
+                    let r = r.unwrap();
+                    received += r.payload.len();
+                    discard += r.discard;
                     more = true;
                 }
             }

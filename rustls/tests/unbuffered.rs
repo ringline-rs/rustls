@@ -412,7 +412,7 @@ fn run(
 
                 client_handshake_done = true;
             }
-            State::ReceivedAppData { records } => {
+            State::ReceivedAppData { records, .. } => {
                 outcome
                     .client_received_app_data
                     .extend(records);
@@ -468,7 +468,7 @@ fn run(
                     .server_received_early_data
                     .extend(records);
             }
-            State::ReceivedAppData { records } => {
+            State::ReceivedAppData { records, .. } => {
                 outcome
                     .server_received_app_data
                     .extend(records);
@@ -580,12 +580,14 @@ fn full_closure_server_to_client() {
             },
         );
 
-        let (_, discard) = read_traffic(client.process_tls_records(buf.filled()), |mut rt| {
-            assert_eq!(rt.peek_len(), NonZeroUsize::new(5));
-            let app_data = rt.next_record().unwrap().unwrap();
-            assert_eq!(app_data.payload, b"hello");
-        });
-        buf.discard(discard);
+        let (record_discard, discard) =
+            read_traffic(client.process_tls_records(buf.filled()), |mut rt| {
+                assert_eq!(rt.peek_len(), NonZeroUsize::new(5));
+                let app_data = rt.next_record().unwrap().unwrap();
+                assert_eq!(app_data.payload, b"hello");
+                app_data.discard
+            });
+        buf.discard(discard + record_discard);
 
         let discard = peer_closed(client.process_tls_records(buf.filled()));
         buf.discard(discard);
@@ -597,12 +599,14 @@ fn full_closure_server_to_client() {
             queue_close_notify(&mut wt, &mut buf);
         });
 
-        let (_, discard) = read_traffic(server.process_tls_records(buf.filled()), |mut rt| {
-            assert_eq!(rt.peek_len(), NonZeroUsize::new(7));
-            let app_data = rt.next_record().unwrap().unwrap();
-            assert_eq!(app_data.payload, b"goodbye");
-        });
-        buf.discard(discard);
+        let (record_discard, discard) =
+            read_traffic(server.process_tls_records(buf.filled()), |mut rt| {
+                assert_eq!(rt.peek_len(), NonZeroUsize::new(7));
+                let app_data = rt.next_record().unwrap().unwrap();
+                assert_eq!(app_data.payload, b"goodbye");
+                app_data.discard
+            });
+        buf.discard(discard + record_discard);
 
         let discard = peer_closed(server.process_tls_records(buf.filled()));
         buf.discard(discard);
@@ -767,8 +771,8 @@ fn refresh_traffic_keys_manually() {
             discard: actual_used,
             state: Ok(ConnectionState::ReadTraffic(mut rt)),
         } => {
-            assert_eq!(used, actual_used);
             let app_data = rt.next_record().unwrap().unwrap();
+            assert_eq!(used, actual_used + app_data.discard);
             assert_eq!(app_data.payload, b"hello");
         }
         st => {
@@ -794,8 +798,8 @@ fn refresh_traffic_keys_manually() {
             discard: actual_used,
             state: Ok(ConnectionState::ReadTraffic(mut rt)),
         } => {
-            assert_eq!(used, actual_used);
             let app_data = rt.next_record().unwrap().unwrap();
+            assert_eq!(used, actual_used + app_data.discard);
             assert_eq!(app_data.payload, b"world");
         }
         st => {
@@ -869,8 +873,8 @@ fn refresh_traffic_keys_automatically() {
                         discard: actual_used,
                         state: Ok(ConnectionState::ReadTraffic(mut rt)),
                     } => {
-                        assert_eq!(used, actual_used);
                         let record = rt.next_record().unwrap().unwrap();
+                        assert_eq!(used, actual_used + record.discard);
                         assert_eq!(record.payload, message.as_bytes());
                     }
                     st => {
@@ -931,8 +935,8 @@ fn tls12_connection_fails_after_key_reaches_confidentiality_limit() {
                         discard: actual_used,
                         state: Ok(ConnectionState::ReadTraffic(mut rt)),
                     } => {
-                        assert_eq!(used, actual_used);
                         let record = rt.next_record().unwrap().unwrap();
+                        assert_eq!(used, actual_used + record.discard);
                         assert_eq!(record.payload, message.as_bytes());
                     }
                     st => {
@@ -1040,12 +1044,15 @@ fn read_traffic_not_consumed_too_early() {
         encrypt(&mut wt, b"hello", &mut client_to_server_buf)
     });
 
-    // if we just peek, we are presented the same data again
+    let record_len = client_to_server_buf.used;
+
+    // if we just peek, we are presented the same data again: the record is decrypted in
+    // place and stays in the buffer, outside the status's discard
     let (_, discard) = read_traffic(
         server.process_tls_records(client_to_server_buf.filled()),
         |rt| assert_eq!(rt.peek_len(), NonZeroUsize::new(5)),
     );
-    assert!(discard > 0);
+    assert_eq!(discard, 0);
     client_to_server_buf.discard(discard);
 
     // ditto
@@ -1055,25 +1062,125 @@ fn read_traffic_not_consumed_too_early() {
     );
     assert_eq!(discard, 0);
 
-    // now consume
-    let (data, discard) = read_traffic(
+    // now consume: the record's bytes come back as the record's discard
+    let ((data, record_discard), discard) = read_traffic(
         server.process_tls_records(client_to_server_buf.filled()),
         |mut rt| {
-            rt.next_record()
-                .unwrap()
-                .unwrap()
-                .payload
-                .to_vec()
+            let record = rt.next_record().unwrap().unwrap();
+            (record.payload.to_vec(), record.discard)
         },
     );
     assert_eq!(discard, 0);
+    assert_eq!(record_discard, record_len);
     assert_eq!(data, b"hello");
+    client_to_server_buf.discard(discard + record_discard);
+    assert_eq!(client_to_server_buf.used, 0);
 
     // server is now idle
     write_traffic(
         server.process_tls_records(client_to_server_buf.filled()),
         |_| (),
     );
+}
+
+/// Two records in the buffer: peeking at the first leaves both in place, reading it reports
+/// its bytes as its discard, and the second follows.
+#[test]
+fn lent_record_followed_by_another() {
+    let mut outcome = handshake(&rustls::version::TLS13);
+    let mut client = outcome.client.take().unwrap();
+    let mut server = outcome.server.take().unwrap();
+
+    let mut buf = Buffer::default();
+    write_traffic(client.process_tls_records(&mut []), |mut wt| {
+        encrypt(&mut wt, b"one", &mut buf);
+    });
+    let first_len = buf.used;
+    write_traffic(client.process_tls_records(&mut []), |mut wt| {
+        encrypt(&mut wt, b"two!", &mut buf);
+    });
+
+    let (_, discard) = read_traffic(server.process_tls_records(buf.filled()), |rt| {
+        assert_eq!(rt.peek_len(), NonZeroUsize::new(3))
+    });
+    assert_eq!(discard, 0);
+
+    let ((data, record_discard), discard) =
+        read_traffic(server.process_tls_records(buf.filled()), |mut rt| {
+            let record = rt.next_record().unwrap().unwrap();
+            let read = (record.payload.to_vec(), record.discard);
+            assert!(rt.next_record().is_none());
+            read
+        });
+    assert_eq!(
+        (data.as_slice(), record_discard, discard),
+        (&b"one"[..], first_len, 0)
+    );
+    buf.discard(discard + record_discard);
+
+    let ((data, record_discard), discard) =
+        read_traffic(server.process_tls_records(buf.filled()), |mut rt| {
+            let record = rt.next_record().unwrap().unwrap();
+            (record.payload.to_vec(), record.discard)
+        });
+    assert_eq!(data, b"two!");
+    buf.discard(discard + record_discard);
+    assert_eq!(buf.used, 0);
+}
+
+/// A caller that reads a lent record but discards only `UnbufferedStatus::discard`, not the
+/// record's `AppDataRecord::discard`, gets an error on the next call, not the record again.
+#[test]
+fn lent_record_discard_ignored_is_an_error() {
+    let mut outcome = handshake(&rustls::version::TLS13);
+    let mut client = outcome.client.take().unwrap();
+    let mut server = outcome.server.take().unwrap();
+
+    let mut buf = Buffer::default();
+    write_traffic(client.process_tls_records(&mut []), |mut wt| {
+        encrypt(&mut wt, b"hello", &mut buf);
+    });
+    let (data, discard) = read_traffic(server.process_tls_records(buf.filled()), |mut rt| {
+        rt.next_record()
+            .unwrap()
+            .unwrap()
+            .payload
+            .to_vec()
+    });
+    assert_eq!(data, b"hello");
+    buf.discard(discard);
+
+    let status = server.process_tls_records(buf.filled());
+    assert!(status.state.is_err(), "{:?}", status.state);
+}
+
+/// A lent record that was not read, presented again in a buffer that no longer holds all of
+/// it, is an error from `next_record`.
+#[test]
+fn lent_record_truncated_buffer_is_an_error() {
+    let mut outcome = handshake(&rustls::version::TLS13);
+    let mut client = outcome.client.take().unwrap();
+    let mut server = outcome.server.take().unwrap();
+
+    let mut buf = Buffer::default();
+    write_traffic(client.process_tls_records(&mut []), |mut wt| {
+        encrypt(&mut wt, b"hello", &mut buf);
+    });
+    let (_, discard) = read_traffic(server.process_tls_records(buf.filled()), |rt| {
+        assert_eq!(rt.peek_len(), NonZeroUsize::new(5))
+    });
+    assert_eq!(discard, 0);
+
+    let short = buf.used - 1;
+    let (result, _) = read_traffic(
+        server.process_tls_records(&mut buf.filled()[..short]),
+        |mut rt| {
+            rt.next_record()
+                .unwrap()
+                .map(|r| r.payload.to_vec())
+        },
+    );
+    assert!(result.is_err(), "{result:?}");
 }
 
 fn write_traffic<T: SideData, R, F: FnMut(WriteTraffic<T>) -> R>(
@@ -1164,6 +1271,8 @@ enum State {
     BlockedHandshake,
     ReceivedAppData {
         records: Vec<Vec<u8>>,
+        /// The sum of the records' `AppDataRecord::discard`, added to the status's discard.
+        discard: usize,
     },
     ReceivedEarlyData {
         records: Vec<Vec<u8>>,
@@ -1248,7 +1357,13 @@ fn advance_client(
 
         state => handle_state(state, &mut buffers.outgoing, actions),
     };
-    buffers.incoming.discard(discard);
+    let records_discard = match &state {
+        State::ReceivedAppData { discard, .. } => *discard,
+        _ => 0,
+    };
+    buffers
+        .incoming
+        .discard(discard + records_discard);
 
     state
 }
@@ -1283,7 +1398,13 @@ fn advance_server(
 
         state => handle_state(state, &mut buffers.outgoing, actions),
     };
-    buffers.incoming.discard(discard);
+    let records_discard = match &state {
+        State::ReceivedAppData { discard, .. } => *discard,
+        _ => 0,
+    };
+    buffers
+        .incoming
+        .discard(discard + records_discard);
 
     state
 }
@@ -1365,10 +1486,13 @@ fn handle_state<Data>(
 
         ConnectionState::ReadTraffic(mut state) => {
             let mut records = vec![];
+            let mut discard = 0;
             let mut peeked_len = state.peek_len();
 
             while let Some(res) = state.next_record() {
-                let payload = res.unwrap().payload.to_vec();
+                let record = res.unwrap();
+                discard += record.discard;
+                let payload = record.payload.to_vec();
                 assert_eq!(NonZeroUsize::new(payload.len()), peeked_len);
                 records.push(payload);
                 peeked_len = state.peek_len();
@@ -1376,7 +1500,7 @@ fn handle_state<Data>(
 
             assert_eq!(None, peeked_len);
 
-            State::ReceivedAppData { records }
+            State::ReceivedAppData { records, discard }
         }
 
         ConnectionState::PeerClosed => State::PeerClosed,
@@ -1974,3 +2098,303 @@ const TLS13_SERVER_TRANSCRIPT_FRAGMENTED: &[&str] = &[
     "TransmitTlsData",
     "WriteTraffic",
 ];
+
+#[derive(Debug, PartialEq)]
+enum ReadEvent {
+    Data(Vec<u8>),
+    PeerClosed,
+}
+
+trait ProcessTlsRecords {
+    type Data;
+    fn process<'c, 'i>(&'c mut self, buf: &'i mut [u8]) -> UnbufferedStatus<'c, 'i, Self::Data>;
+}
+
+impl ProcessTlsRecords for UnbufferedClientConnection {
+    type Data = ClientConnectionData;
+    fn process<'c, 'i>(&'c mut self, buf: &'i mut [u8]) -> UnbufferedStatus<'c, 'i, Self::Data> {
+        self.process_tls_records(buf)
+    }
+}
+
+impl ProcessTlsRecords for UnbufferedServerConnection {
+    type Data = ServerConnectionData;
+    fn process<'c, 'i>(&'c mut self, buf: &'i mut [u8]) -> UnbufferedStatus<'c, 'i, Self::Data> {
+        self.process_tls_records(buf)
+    }
+}
+
+/// Feed `wire` to `conn` in `step`-byte chunks and collect what it reads. With `peek_first`,
+/// each record is first only peeked, and more input is appended before it is read.
+fn read_in_steps<C: ProcessTlsRecords>(
+    conn: &mut C,
+    wire: &[u8],
+    step: usize,
+    peek_first: bool,
+) -> Vec<ReadEvent> {
+    let mut incoming = Buffer::default();
+    let mut events = vec![];
+    let mut fed = 0;
+    let mut peeked: Option<usize> = None;
+    let mut iterations = 0;
+    loop {
+        if fed < wire.len() {
+            let n = step.min(wire.len() - fed);
+            incoming.append(&wire[fed..fed + n]);
+            fed += n;
+        }
+        loop {
+            iterations += 1;
+            assert!(iterations < 100_000);
+            let status = conn.process(incoming.filled());
+            let mut discard = status.discard;
+            let mut need_more = false;
+            let mut done = false;
+            match status.state.unwrap() {
+                ConnectionState::ReadTraffic(mut rt) => {
+                    if peek_first && peeked.is_none() {
+                        peeked = Some(rt.peek_len().unwrap().get());
+                        need_more = fed < wire.len();
+                    } else {
+                        while let Some(r) = rt.next_record() {
+                            let r = r.unwrap();
+                            if let Some(p) = peeked.take() {
+                                assert_eq!(p, r.payload.len());
+                            }
+                            discard += r.discard;
+                            events.push(ReadEvent::Data(r.payload.to_vec()));
+                        }
+                    }
+                }
+                ConnectionState::PeerClosed => events.push(ReadEvent::PeerClosed),
+                ConnectionState::EncodeTlsData(mut etd) => {
+                    let mut out = vec![0u8; 1024];
+                    etd.encode(&mut out).unwrap();
+                }
+                ConnectionState::TransmitTlsData(t) => t.done(),
+                ConnectionState::WriteTraffic(_) | ConnectionState::BlockedHandshake => {
+                    need_more = true
+                }
+                ConnectionState::Closed => done = true,
+                other => panic!("unexpected {other:?}"),
+            }
+            incoming.discard(discard);
+            if done {
+                return events;
+            }
+            if need_more {
+                break;
+            }
+        }
+        if fed == wire.len() && peeked.is_none() {
+            return events;
+        }
+    }
+}
+
+/// A client and server that have completed a handshake, for each suite of the default
+/// provider.
+fn connected_pairs() -> Vec<(
+    String,
+    UnbufferedClientConnection,
+    UnbufferedServerConnection,
+)> {
+    let mut pairs = vec![];
+    for suite in provider::default_provider()
+        .cipher_suites
+        .iter()
+        .copied()
+    {
+        let kt = match format!("{:?}", suite.suite()).contains("ECDSA") {
+            true => KeyType::EcdsaP256,
+            false => KeyType::Rsa2048,
+        };
+        let provider = CryptoProvider {
+            cipher_suites: vec![suite],
+            ..provider::default_provider()
+        };
+        let server_config = make_server_config(kt, &provider);
+        let client_config = make_client_config(kt, &provider);
+        let mut outcome = run(
+            Arc::new(client_config),
+            &mut NO_ACTIONS.clone(),
+            Arc::new(server_config),
+            &mut NO_ACTIONS.clone(),
+        );
+        pairs.push((
+            format!("{:?}", suite.suite()),
+            outcome.client.take().unwrap(),
+            outcome.server.take().unwrap(),
+        ));
+    }
+    pairs
+}
+
+/// The server writes r0, r1, a KeyUpdate (TLS 1.3), r2, r3 and close_notify into one buffer;
+/// the client reads it in chunks of several sizes, with and without peeking first.
+#[test]
+fn lent_records_with_key_update_and_close_notify() {
+    for step in [1usize, 3, 7, 29, 100_000] {
+        for peek_first in [false, true] {
+            for (name, mut client, mut server) in connected_pairs() {
+                let mut wire = Buffer::default();
+                let is13 = name.starts_with("TLS13");
+                write_traffic(server.process_tls_records(&mut []), |mut wt| {
+                    encrypt(&mut wt, b"r0", &mut wire);
+                    encrypt(&mut wt, b"r1-xyz", &mut wire);
+                    if is13 {
+                        wt.refresh_traffic_keys().unwrap();
+                    }
+                });
+                if is13 {
+                    let (bytes, _) = encode_tls_data(server.process_tls_records(&mut []));
+                    wire.append(&bytes);
+                    confirm_transmit_tls_data(server.process_tls_records(&mut []));
+                }
+                write_traffic(server.process_tls_records(&mut []), |mut wt| {
+                    encrypt(&mut wt, b"r2", &mut wire);
+                    encrypt(&mut wt, b"r3-last", &mut wire);
+                    queue_close_notify(&mut wt, &mut wire);
+                });
+                let bytes = wire.filled().to_vec();
+                assert_eq!(
+                    read_in_steps(&mut client, &bytes, step, peek_first),
+                    vec![
+                        ReadEvent::Data(b"r0".to_vec()),
+                        ReadEvent::Data(b"r1-xyz".to_vec()),
+                        ReadEvent::Data(b"r2".to_vec()),
+                        ReadEvent::Data(b"r3-last".to_vec()),
+                        ReadEvent::PeerClosed,
+                    ],
+                    "{name} step={step} peek={peek_first}"
+                );
+            }
+        }
+    }
+}
+
+/// As `lent_records_with_key_update_and_close_notify`, client to server.
+#[test]
+fn lent_records_client_to_server() {
+    for step in [1usize, 5, 100_000] {
+        for peek_first in [false, true] {
+            for (name, mut client, mut server) in connected_pairs() {
+                let mut wire = Buffer::default();
+                write_traffic(client.process_tls_records(&mut []), |mut wt| {
+                    encrypt(&mut wt, b"a", &mut wire);
+                    encrypt(&mut wt, &[7u8; 3000], &mut wire);
+                    queue_close_notify(&mut wt, &mut wire);
+                });
+                let bytes = wire.filled().to_vec();
+                assert_eq!(
+                    read_in_steps(&mut server, &bytes, step, peek_first),
+                    vec![
+                        ReadEvent::Data(b"a".to_vec()),
+                        ReadEvent::Data(vec![7u8; 3000]),
+                        ReadEvent::PeerClosed
+                    ],
+                    "{name} step={step} peek={peek_first}"
+                );
+            }
+        }
+    }
+}
+
+/// After a peek, the caller discards more than `UnbufferedStatus::discard`, by `extra`
+/// bytes, while more records follow, so the buffer is long enough. `next_record` must
+/// return an error, not other bytes as the lent record's plaintext.
+fn lent_record_moved_is_an_error(first: &[u8], second: &[u8], extra: usize) {
+    let mut outcome = handshake(&rustls::version::TLS13);
+    let mut client = outcome.client.take().unwrap();
+    let mut server = outcome.server.take().unwrap();
+    let mut buf = Buffer::default();
+    write_traffic(server.process_tls_records(&mut []), |mut wt| {
+        encrypt(&mut wt, first, &mut buf);
+    });
+    let first_len = buf.used;
+    write_traffic(server.process_tls_records(&mut []), |mut wt| {
+        encrypt(&mut wt, second, &mut buf);
+        encrypt(&mut wt, second, &mut buf);
+    });
+    let (_, discard) = read_traffic(client.process_tls_records(buf.filled()), |rt| {
+        assert_eq!(rt.peek_len(), NonZeroUsize::new(first.len()))
+    });
+    buf.discard(discard + extra);
+    let (result, discard) = read_traffic(client.process_tls_records(buf.filled()), |mut rt| {
+        rt.next_record()
+            .unwrap()
+            .map(|r| r.payload.to_vec())
+    });
+    assert!(result.is_err(), "{result:?}");
+    // After the caller discards to the next record boundary, the stored error is returned,
+    // not the second record.
+    buf.discard(discard + first_len - extra);
+    let status = client.process_tls_records(buf.filled());
+    assert!(lent_record_lost_error(&status.state), "{:?}", status.state);
+}
+
+/// Whether `state` is the error `next_record` stores when a lent record is no longer in the
+/// buffer.
+fn lent_record_lost_error<T>(state: &Result<T, Error>) -> bool {
+    matches!(state, Err(Error::General(m)) if m.contains("no longer holds the decrypted record"))
+}
+
+#[test]
+fn lent_record_shifted_is_an_error() {
+    lent_record_moved_is_an_error(b"first", b"second record here", 3);
+}
+
+/// The caller discards the peeked record itself; the next record has the same length, so
+/// the same header, and only the tag tells them apart.
+#[test]
+fn lent_record_replaced_by_same_length_record_is_an_error() {
+    let mut outcome = handshake(&rustls::version::TLS13);
+    let mut client = outcome.client.take().unwrap();
+    let mut server = outcome.server.take().unwrap();
+    let mut buf = Buffer::default();
+    write_traffic(server.process_tls_records(&mut []), |mut wt| {
+        encrypt(&mut wt, b"same!", &mut buf);
+    });
+    let record_len = buf.used;
+    write_traffic(server.process_tls_records(&mut []), |mut wt| {
+        encrypt(&mut wt, b"same?", &mut buf);
+    });
+    let (_, discard) = read_traffic(client.process_tls_records(buf.filled()), |rt| {
+        assert_eq!(rt.peek_len(), NonZeroUsize::new(5))
+    });
+    assert_eq!(discard, 0);
+    buf.discard(record_len);
+    let (result, _) = read_traffic(client.process_tls_records(buf.filled()), |mut rt| {
+        rt.next_record()
+            .unwrap()
+            .map(|r| r.payload.to_vec())
+    });
+    assert!(result.is_err(), "{result:?}");
+    // "same?" is not returned in place of the lost "same!": the stored error is.
+    let status = client.process_tls_records(buf.filled());
+    assert!(lent_record_lost_error(&status.state), "{:?}", status.state);
+}
+
+/// A peeked record whose header changed (here its length field) before it is read is an
+/// error; the rest of the record, including its tag, is unchanged.
+#[test]
+fn lent_record_header_changed_is_an_error() {
+    let mut outcome = handshake(&rustls::version::TLS13);
+    let mut client = outcome.client.take().unwrap();
+    let mut server = outcome.server.take().unwrap();
+    let mut buf = Buffer::default();
+    write_traffic(server.process_tls_records(&mut []), |mut wt| {
+        encrypt(&mut wt, b"hello", &mut buf);
+    });
+    let (_, discard) = read_traffic(client.process_tls_records(buf.filled()), |rt| {
+        assert_eq!(rt.peek_len(), NonZeroUsize::new(5))
+    });
+    assert_eq!(discard, 0);
+    buf.filled()[4] ^= 1;
+    let (result, _) = read_traffic(client.process_tls_records(buf.filled()), |mut rt| {
+        rt.next_record()
+            .unwrap()
+            .map(|r| r.payload.to_vec())
+    });
+    assert!(result.is_err(), "{result:?}");
+}

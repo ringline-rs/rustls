@@ -853,6 +853,10 @@ pub struct UnbufferedConnectionCommon<Data> {
     pub(crate) core: ConnectionCore<Data>,
     wants_write: bool,
     emitted_peer_closed_state: bool,
+    /// A decrypted record lent from the caller's buffer and not yet returned by
+    /// `ReadTraffic::next_record`. It starts at the front of the buffer the next call
+    /// receives, once the caller has applied the discard of the call that lent it.
+    lent_record: Option<unbuffered::LentRecord>,
 }
 
 impl<Data> From<ConnectionCore<Data>> for UnbufferedConnectionCommon<Data> {
@@ -861,6 +865,7 @@ impl<Data> From<ConnectionCore<Data>> for UnbufferedConnectionCommon<Data> {
             core,
             wants_write: false,
             emitted_peer_closed_state: false,
+            lent_record: None,
         }
     }
 }

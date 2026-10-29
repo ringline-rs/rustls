@@ -50,6 +50,13 @@ pub struct CommonState {
     pub(crate) peer_certificates: Option<CertificateChain<'static>>,
     message_fragmenter: MessageFragmenter,
     pub(crate) received_plaintext: ChunkVecBuffer,
+    /// Set by the unbuffered API: received application data is left where it was decrypted,
+    /// in the caller's `incoming_tls` buffer, and its address recorded in `lent_plaintext`,
+    /// instead of being copied into `received_plaintext`.
+    pub(crate) lend_received_plaintext: bool,
+    /// The address and length of a decrypted application-data record in the caller's buffer,
+    /// for the unbuffered API to lend from `ReadTraffic`.
+    pub(crate) lent_plaintext: Option<(usize, usize)>,
     pub(crate) sendable_tls: ChunkVecBuffer,
     queued_key_update_message: Option<Vec<u8>>,
 
@@ -85,6 +92,8 @@ impl CommonState {
             peer_certificates: None,
             message_fragmenter: MessageFragmenter::default(),
             received_plaintext: ChunkVecBuffer::new(Some(DEFAULT_RECEIVED_PLAINTEXT_LIMIT)),
+            lend_received_plaintext: false,
+            lent_plaintext: None,
             sendable_tls: ChunkVecBuffer::new(Some(DEFAULT_BUFFER_LIMIT)),
             queued_key_update_message: None,
             protocol: Protocol::Tcp,
@@ -553,8 +562,21 @@ impl CommonState {
 
     pub(crate) fn take_received_plaintext(&mut self, bytes: Payload<'_>) {
         self.temper_counters.received_app_data();
-        self.received_plaintext
-            .append(bytes.into_vec());
+        match bytes {
+            // The unbuffered API processes one record before returning `ReadTraffic`, so at
+            // most one is lent at a time. An empty record is dropped, as `append` drops it.
+            Payload::Borrowed(slice)
+                if self.lend_received_plaintext
+                    && self.lent_plaintext.is_none()
+                    && !slice.is_empty() =>
+            {
+                self.lent_plaintext = Some((slice.as_ptr() as usize, slice.len()));
+            }
+            bytes => {
+                self.received_plaintext
+                    .append(bytes.into_vec());
+            }
+        }
     }
 
     #[cfg(feature = "tls12")]
