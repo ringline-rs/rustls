@@ -2,7 +2,7 @@
 
 A fork of [rustls](https://github.com/rustls/rustls) maintained for
 [ringline](https://github.com/ringline-rs/ringline). The library is named
-`ringline_tls`; its API is rustls's.
+`ringline_tls`; its API is rustls's plus the additions listed under Why.
 
 Upstream: v/0.23.46
 
@@ -10,9 +10,16 @@ Upstream: v/0.23.46
 
 ringline needs changes to the TLS record layer, for example to encrypt into
 and decrypt out of its own buffers. The fork carries them and releases them
-on its own schedule. Until the first such change, a release is the upstream
-release named on the `Upstream:` line, renamed, with rustls-webpki 0.103.16
-or later. The design is in ringline's
+on its own schedule. A release is the upstream release named on the
+`Upstream:` line, renamed, with rustls-webpki 0.103.16 or later, plus these
+changes:
+
+- In the unbuffered API, `WriteTraffic::encrypt` has the TLS 1.3 encrypters
+  of both providers seal application-data records in the caller's buffer.
+  API additions: `MessageEncrypter::encrypt_into` (a provided method
+  that defaults to `encrypt` plus a copy) and `OutboundChunks::copy_to_slice`.
+
+The design is in ringline's
 [docs/rustls-quinn-forks-design.md](https://github.com/ringline-rs/ringline/blob/main/docs/rustls-quinn-forks-design.md).
 
 ## Branches and versions

@@ -102,6 +102,37 @@ impl<'a> OutboundChunks<'a> {
         }
     }
 
+    /// Copy all bytes to the start of `out` and return how many were copied.
+    ///
+    /// That is [`len`](Self::len), unless a `Multiple`'s `end` lies past the bytes its
+    /// chunks hold, when it is fewer. Panics if `out` is shorter than the bytes copied.
+    pub fn copy_to_slice(&self, out: &mut [u8]) -> usize {
+        match *self {
+            Self::Single(chunk) => {
+                out[..chunk.len()].copy_from_slice(chunk);
+                chunk.len()
+            }
+            Self::Multiple { chunks, start, end } => {
+                let mut size = 0;
+                let mut written = 0;
+                for chunk in chunks.iter() {
+                    let psize = size;
+                    let len = chunk.len();
+                    size += len;
+                    if size <= start || psize >= end {
+                        continue;
+                    }
+                    let start = start.saturating_sub(psize);
+                    let end = if end - psize < len { end - psize } else { len };
+                    let part = &chunk[start..end];
+                    out[written..written + part.len()].copy_from_slice(part);
+                    written += part.len();
+                }
+                written
+            }
+        }
+    }
+
     /// Split self in two, around an index
     /// Works similarly to `split_at` in the core library, except it doesn't panic if out of bound
     pub fn split_at(&self, mid: usize) -> (Self, Self) {

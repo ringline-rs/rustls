@@ -21,7 +21,10 @@ mod common;
 use common::*;
 use provider::cipher_suite;
 
-const MAX_ITERATIONS: usize = 100;
+// The slowest run, `app_data_every_suite_and_fragment_size` with aws-lc-rs TLS 1.3,
+// max_fragment_size 64 and a post-quantum key share under default features, takes 306
+// iterations: about 205 for the handshake, then one record per iteration.
+const MAX_ITERATIONS: usize = 1000;
 
 #[test]
 fn tls12_handshake() {
@@ -201,6 +204,63 @@ fn app_data_server_to_client() {
     }
 }
 
+/// Application data in both directions for every cipher suite of the default provider,
+/// with records split by several `max_fragment_size`s, received intact. Checks the record
+/// layer's `encrypt_into` path (`WriteTraffic::encrypt`) against a peer that decrypts.
+#[test]
+fn app_data_every_suite_and_fragment_size() {
+    let provider = provider::default_provider();
+    // Fits the harness's 16 KiB buffers at every fragment size.
+    let payload: Vec<u8> = (0..6_000u32)
+        .map(|i| (i % 251) as u8)
+        .collect();
+    for suite in provider.cipher_suites.iter().copied() {
+        let kt = match format!("{:?}", suite.suite()).contains("ECDSA") {
+            true => KeyType::EcdsaP256,
+            false => KeyType::Rsa2048,
+        };
+        let provider = CryptoProvider {
+            cipher_suites: vec![suite],
+            ..provider::default_provider()
+        };
+        for max_fragment_size in [None, Some(512), Some(64)] {
+            eprintln!("{:?} {max_fragment_size:?}", suite.suite());
+            let mut server_config = make_server_config(kt, &provider);
+            server_config.max_fragment_size = max_fragment_size;
+            let mut client_config = make_client_config(kt, &provider);
+            client_config.max_fragment_size = max_fragment_size;
+
+            let mut client_actions = Actions {
+                app_data_to_send: Some(&payload),
+                ..NO_ACTIONS
+            };
+            let mut server_actions = Actions {
+                app_data_to_send: Some(&payload),
+                ..NO_ACTIONS
+            };
+            let outcome = run(
+                Arc::new(client_config),
+                &mut client_actions,
+                Arc::new(server_config),
+                &mut server_actions,
+            );
+
+            assert_eq!(
+                outcome
+                    .server_received_app_data
+                    .concat(),
+                payload
+            );
+            assert_eq!(
+                outcome
+                    .client_received_app_data
+                    .concat(),
+                payload
+            );
+        }
+    }
+}
+
 #[test]
 fn early_data() {
     let provider = provider::default_provider();
@@ -302,10 +362,13 @@ fn run(
     let mut server = UnbufferedServerConnection::new(server_config.clone()).unwrap();
     let mut buffers = BothBuffers::default();
 
+    // Run until both sides have done their actions and processed every byte the peer sent.
     while !(client_handshake_done
         && server_handshake_done
         && client_actions.finished()
-        && server_actions.finished())
+        && server_actions.finished()
+        && buffers.client.incoming.used == 0
+        && buffers.server.incoming.used == 0)
     {
         match advance_client(
             &mut client,
@@ -418,7 +481,13 @@ fn run(
 
         count += 1;
 
-        assert!(count <= MAX_ITERATIONS, "handshake was not completed");
+        assert!(
+            count <= MAX_ITERATIONS,
+            "run did not finish within {MAX_ITERATIONS} iterations \
+             (client incoming {} bytes, server incoming {} bytes)",
+            buffers.client.incoming.used,
+            buffers.server.incoming.used,
+        );
     }
 
     println!("finished with:");

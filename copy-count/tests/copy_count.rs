@@ -6,17 +6,17 @@
 //! way, such as a loop over the bytes, is not counted. Lower a bound when a
 //! change removes a copy.
 //!
-//! rustls 0.23.46, measured on aarch64 Linux: send 2.02 at 1 KiB records and
-//! 2.00 at 16 KiB (the `PrefixedPayload` copy and the copy of the sealed
-//! record into the caller's buffer); receive 1.00 (`into_vec` after the
-//! in-place decrypt).
+//! Measured on aarch64 Linux with the ring provider: send 1.00 at 1, 4 and
+//! 16 KiB records (the copy of the plaintext into the caller's buffer, sealed
+//! there by `MessageEncrypter::encrypt_into`); receive 1.00 (`into_vec` after
+//! the in-place decrypt).
 
 #![cfg(target_os = "linux")]
 
 use std::process::Command;
 
 /// Most bytes copied per plaintext byte on send.
-const SEND_MAX: f64 = 2.1;
+const SEND_MAX: f64 = 1.1;
 /// Most bytes copied per plaintext byte on receive.
 const RECV_MAX: f64 = 1.1;
 
