@@ -2,18 +2,40 @@
 # fork's own versions; upstream's tags are `v/X.Y.Z`), and creates a GitHub
 # release whose notes name the upstream tag. Needs the CARGO_REGISTRY_TOKEN
 # secret.
+#
+# Then it opens a pull request against ringline's main that raises ringline's
+# ringline-tls requirement to the release, when main requires an earlier
+# 0.1.x version (admin/ringline-raise). That job authenticates as the GitHub
+# App ringline-update.yml uses (RINGLINE_APP_ID, RINGLINE_APP_PRIVATE_KEY);
+# ringline-rs/ringline must be among the repositories the App's ringline-rs
+# installation selects. If only that job failed, use "Re-run failed jobs" on
+# the run. To replace a raise pull request that conflicts, close it and
+# delete its `deps/` branch in ringline, then run this workflow by hand with
+# the release tag. A run by hand skips publish and uses admin/ringline-raise
+# as it is at the tag. If publish failed after the crate was uploaded, create
+# the GitHub release by hand and run this workflow by hand with the tag.
+# Raises run one at a time. GitHub keeps one waiting ringline job and
+# cancels an older waiting one, which then opened nothing. If the
+# cancelled job's tag is higher than the raise that ran after it, run this
+# workflow by hand with its tag.
 name: ringline release
 
 on:
   push:
     tags:
       - 'v[0-9]+.[0-9]+.[0-9]+'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Published release tag (vX.Y.Z) to open the ringline pull request for
+        required: true
 
 permissions:
   contents: write
 
 jobs:
   publish:
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -40,3 +62,62 @@ jobs:
             --notes "Upstream: $upstream
 
           rustls changes: https://github.com/rustls/rustls/releases/tag/$upstream"
+
+  ringline:
+    needs: publish
+    # After publish on a tag push; on its own when run by hand.
+    if: ${{ !cancelled() && (needs.publish.result == 'success' || (github.event_name == 'workflow_dispatch' && needs.publish.result == 'skipped')) }}
+    runs-on: ubuntu-latest
+    # One raise at a time, so a second release sees the first one's pull
+    # request and supersedes it.
+    concurrency:
+      group: ringline-raise
+      cancel-in-progress: false
+    permissions:
+      contents: read
+    steps:
+      - name: Check the tag
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::tag must be vX.Y.Z, got $TAG"
+            exit 1
+          fi
+      # All history and tags: admin/ringline-raise reads RINGLINE.md at the
+      # tag of the version ringline requires.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+      # Tools first, so no third-party build script runs while the token is
+      # on disk.
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-audit
+        uses: taiki-e/cache-cargo-install-action@v3
+        with:
+          tool: cargo-audit
+      - uses: actions/create-github-app-token@v2
+        id: app
+        with:
+          app-id: ${{ vars.RINGLINE_APP_ID }}
+          private-key: ${{ secrets.RINGLINE_APP_PRIVATE_KEY }}
+          owner: ringline-rs
+          repositories: ringline
+          permission-contents: write
+          permission-pull-requests: write
+      - uses: actions/checkout@v4
+        with:
+          repository: ringline-rs/ringline
+          ref: main
+          path: downstream
+          token: ${{ steps.app.outputs.token }}
+      - name: Open the ringline pull request
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+        run: |
+          git -C downstream config user.name "ringline-rs release"
+          git -C downstream config user.email "noreply@github.com"
+          admin/ringline-raise --ringline downstream --push

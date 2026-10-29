@@ -1,0 +1,324 @@
+#!/usr/bin/env python3
+"""Open a pull request in ringline that raises ringline's requirement on
+this crate (PACKAGE below) to this release.
+
+Run from the fork's repository root with the release tag checked out and the
+fork's tags fetched, after the release is published. DIR (--ringline) is a
+checkout of ringline at the branch the pull request targets (--base). The
+script:
+
+1. Reads the release version from MANIFEST, and the requirement from the
+   `PACKAGE = { version = "X.Y.Z" ... }` line in DIR's workspace Cargo.toml.
+   It does nothing when the requirement is at or above the release. It also
+   does nothing when the requirement is on another minor version: a move to
+   a newer minor version is a breaking change, and a release on an older one
+   belongs on a ringline maintenance branch, both done by hand.
+2. Names the RustSec advisories the raise fixes: those against the upstream
+   release in the required version (`Upstream:` in RINGLINE.md at the fork's
+   tag for that version) that are not against the one in this release. It
+   needs cargo-audit; without it the pull request names none. It first runs
+   admin/ringline-advisory-check's control, and stops if cargo-audit cannot
+   fetch the advisory database or reports nothing for the control. Advisories
+   against upstream's dependencies or the fork's own changes, and GitHub
+   advisories (GHSA) not in the RustSec database, are not found this way; the
+   pull request links the fork's changes for a person to check.
+3. Locks the release with `cargo update --precise`, retrying any failure for
+   up to INDEX_WAIT_SECS while the crates.io index catches up, then raises
+   the requirement. Locking first keeps the lock at the release: once the
+   manifest excludes the locked version, cargo ignores --precise and locks
+   the newest compatible one (seen on cargo 1.88, 1.98 and 1.99). A lock
+   already at or above the release is left as it is. It then checks the
+   lock with `cargo metadata --locked`. A comment above the requirement
+   names the upstream release and the advisories, under a heading line
+   added on the first raise. The pull request lists every other package the
+   lock moved.
+4. Commits on `deps/PACKAGE-X.Y.Z`, or `deps/BASE/PACKAGE-X.Y.Z` when --base
+   is not main. With --push, it pushes the branch to --repo and opens the
+   pull request into --base. The pull request names the open raise pull
+   requests into --base for lower versions, which it supersedes. An open
+   raise pull request into --base for this or a higher version ends the run
+   with exit status 0. This release's branch without an open pull request
+   is an error, since it may hold another attempt's commit.
+
+Usage: admin/ringline-raise --ringline DIR [--base BRANCH] [--repo OWNER/NAME] [--push]
+"""
+
+import argparse
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+
+PACKAGE = "ringline-tls"
+MANIFEST = "rustls/Cargo.toml"
+UPSTREAM_NAME = "rustls"
+UPSTREAM_LINE = r"^Upstream: v/(\d+\.\d+\.\d+)$"
+FORK_REPO = "ringline-rs/rustls"
+# How long `cargo update --precise` is retried for a just-published release.
+INDEX_WAIT_SECS = 600
+
+
+class Failed(Exception):
+    pass
+
+
+def run(*args, check=True, cwd=None):
+    r = subprocess.run(args, capture_output=True, text=True, cwd=cwd)
+    if check and r.returncode != 0:
+        raise Failed(f"`{' '.join(args)}` failed:\n{r.stdout}{r.stderr}")
+    return r.stdout.strip()
+
+
+def version_tuple(v):
+    return tuple(int(x) for x in v.split("."))
+
+
+def fork_version():
+    m = re.search(r'^version = "(\d+\.\d+\.\d+)"$', open(MANIFEST).read(), re.M)
+    if not m:
+        raise Failed(f"{MANIFEST}: no package version")
+    return m.group(1)
+
+
+def upstream_in(text):
+    m = re.search(UPSTREAM_LINE, text, re.M)
+    if not m:
+        raise Failed("RINGLINE.md: no `Upstream:` line")
+    return m.group(1)
+
+
+def check_audit():
+    """Fail unless cargo-audit reports the control version's advisories; does
+    nothing without cargo-audit."""
+    if shutil.which("cargo-audit") is None:
+        return
+    out = subprocess.run(["python3", "admin/ringline-advisory-check"], capture_output=True, text=True)
+    # 0 and 1 both mean the control was reported; 2 means the check is broken.
+    if out.returncode not in (0, 1):
+        raise Failed(f"admin/ringline-advisory-check is broken:\n{out.stdout}{out.stderr}")
+
+
+def advisory_ids(version):
+    """RustSec IDs against upstream `version`, or None without cargo-audit."""
+    if shutil.which("cargo-audit") is None:
+        return None
+    out = subprocess.run(
+        ["python3", "admin/ringline-advisory-check", "--ids", version], capture_output=True, text=True
+    )
+    if out.returncode != 0:
+        raise Failed(f"admin/ringline-advisory-check --ids {version} failed:\n{out.stderr}")
+    return set(out.stdout.split())
+
+
+def requirement_re():
+    return re.compile(rf'^({re.escape(PACKAGE)} = \{{ version = ")(\d+\.\d+\.\d+)(".*)$', re.M)
+
+
+def heading():
+    return f"# Raised by {FORK_REPO}'s release workflow (admin/ringline-raise):\n"
+
+
+def comment_lines(version, upstream, fixed):
+    text = f"{version} is {UPSTREAM_NAME} {upstream}"
+    if fixed:
+        text += ", past " + ", ".join(fixed)
+    lines, line = [], "#"
+    for word in (text + ".").split():
+        if len(line) + 1 + len(word) > 79 and line != "#":
+            lines.append(line)
+            line = "#  "
+        line += " " + word
+    lines.append(line)
+    return "".join(l + "\n" for l in lines)
+
+
+def raise_requirement(text, version, upstream, fixed):
+    """`text` with the requirement raised and a comment above it. The heading
+    goes in on the first raise; later raises add their lines under it."""
+    m = requirement_re().search(text)
+    added = comment_lines(version, upstream, fixed)
+    if heading() not in text:
+        added = heading() + added
+    line = f"{m.group(1)}{version}{m.group(3)}"
+    return text[: m.start()] + added + line + text[m.end() :]
+
+
+def locked_version(ringline, version):
+    """PACKAGE's version in DIR's Cargo.lock on the minor version of `version`,
+    or None. The lock can hold PACKAGE at two minor versions at once."""
+    found = re.findall(rf'^name = "{re.escape(PACKAGE)}"\nversion = "(\d+\.\d+\.\d+)"$',
+                       open(os.path.join(ringline, "Cargo.lock")).read(), re.M)
+    same = [v for v in found if version_tuple(v)[:2] == version_tuple(version)[:2]]
+    return max(same, key=version_tuple) if same else None
+
+
+def relock(ringline, locked, version):
+    """Move PACKAGE from `locked` to `version` in the lock; returns cargo's
+    lines for the packages that moved."""
+    spec = f"{PACKAGE}@{locked}" if locked else PACKAGE
+    deadline = time.monotonic() + INDEX_WAIT_SECS
+    while True:
+        r = subprocess.run(
+            ["cargo", "update", "-p", spec, "--precise", version],
+            capture_output=True, text=True, cwd=ringline,
+        )
+        if r.returncode == 0:
+            return [l.strip() for l in r.stderr.splitlines()
+                    if re.match(r"\s*(Updating|Downgrading|Adding|Removing) \S+ v", l)]
+        if time.monotonic() > deadline:
+            raise Failed(f"`cargo update -p {spec} --precise {version}` failed for "
+                         f"{INDEX_WAIT_SECS} s (the crates.io index may lag; cargo's error "
+                         f"follows):\n{r.stderr}")
+        time.sleep(30)
+
+
+def branch_prefix(base):
+    return "deps/" if base == "main" else f"deps/{base}/"
+
+
+def raise_branches(gh, repo, base):
+    """{version: pull request number} for the open raise pull requests into
+    `base` from branches in `repo` itself."""
+    out = gh("pr", "list", "--repo", repo, "--state", "open", "--base", base, "--limit", "1000",
+             "--json", "number,headRefName,isCrossRepository", "--jq",
+             '.[] | select(.isCrossRepository | not) | "\\(.number) \\(.headRefName)"')
+    found = {}
+    for line in out.splitlines():
+        number, name = line.split(" ", 1)
+        m = re.fullmatch(rf"{re.escape(branch_prefix(base) + PACKAGE)}-(\d+\.\d+\.\d+)", name)
+        if m:
+            found[m.group(1)] = number
+    return found
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    ap.add_argument("--ringline", required=True, help="a ringline checkout at the target branch")
+    ap.add_argument("--base", default="main", help="the branch the pull request targets")
+    ap.add_argument("--repo", default="ringline-rs/ringline", help="ringline's GitHub repository")
+    ap.add_argument("--push", action="store_true", help="push the branch and open the pull request")
+    opts = ap.parse_args()
+    os.environ["CARGO_TERM_COLOR"] = "never"
+
+    version = fork_version()
+    manifest = os.path.join(opts.ringline, "Cargo.toml")
+    text = open(manifest).read()
+    m = requirement_re().search(text)
+    if not m:
+        raise Failed(f"{manifest}: no `{PACKAGE} = {{ version = \"X.Y.Z\" ... }}` line")
+    required = m.group(2)
+    if version_tuple(required)[:2] != version_tuple(version)[:2]:
+        print(f"ringline's {opts.base} requires {PACKAGE} {required}, another minor version than "
+              f"{version}; a move to a newer minor version, or a raise on a maintenance "
+              "branch, is done by hand")
+        return
+    if version_tuple(required) >= version_tuple(version):
+        print(f"ringline already requires {PACKAGE} {required}")
+        return
+
+    upstream = upstream_in(open("RINGLINE.md").read())
+    old_upstream = upstream_in(run("git", "show", f"v{required}:RINGLINE.md"))
+    check_audit()
+    old_ids, new_ids = advisory_ids(old_upstream), advisory_ids(upstream)
+    fixed = None if old_ids is None or new_ids is None else sorted(old_ids - new_ids)
+
+    branch = f"{branch_prefix(opts.base)}{PACKAGE}-{version}"
+    remote = f"https://github.com/{opts.repo}.git"
+
+    def git(*args):
+        return run("git", *args, cwd=opts.ringline)
+
+    def gh(*args):
+        return run("gh", *args, cwd=opts.ringline)
+
+    superseded = []
+    if opts.push:
+        open_prs = raise_branches(gh, opts.repo, opts.base)
+        newer = [v for v in open_prs if version_tuple(v) >= version_tuple(version)]
+        if newer:
+            newest = max(newer, key=version_tuple)
+            print(f"{opts.repo} already has an open raise pull request for {PACKAGE} {newest}")
+            return
+        if git("ls-remote", "--heads", remote, branch):
+            raise Failed(
+                f"{opts.repo} has branch {branch} with no open pull request into {opts.base}; "
+                f"open one from it "
+                "or delete the branch, then re-run this job"
+            )
+        superseded = [open_prs[v] for v in sorted(open_prs, key=version_tuple)]
+
+    git("checkout", "--quiet", "-b", branch)
+    # Lock before raising: see step 3 of the docstring.
+    locked = locked_version(opts.ringline, version)
+    if locked and version_tuple(locked) >= version_tuple(version):
+        print(f"Cargo.lock already has {PACKAGE} {locked}")
+        moved = []
+    else:
+        moved = relock(opts.ringline, locked, version)
+    others = [l for l in moved if not re.match(rf"\S+ {re.escape(PACKAGE)} v", l)]
+    with open(manifest, "w") as f:
+        f.write(raise_requirement(text, version, upstream, fixed))
+    run("cargo", "metadata", "--locked", "--format-version", "1", cwd=opts.ringline)
+
+    release = f"https://github.com/{FORK_REPO}/releases/tag/v{version}"
+    still = sorted(new_ids & old_ids) if new_ids and old_ids is not None else []
+    newly = sorted(new_ids - old_ids) if new_ids and old_ids is not None else []
+    if fixed and not newly:
+        title = f"fix(deps): raise {PACKAGE} to {version} for {', '.join(fixed)}"
+    else:
+        title = f"chore(deps): raise {PACKAGE} to {version}"
+    body = (
+        f"{PACKAGE} {version} is {UPSTREAM_NAME} {upstream} ({release}). "
+        f"The requirement was {required} ({UPSTREAM_NAME} {old_upstream}).\n"
+    )
+    if fixed:
+        body += f"\nAdvisories fixed: {', '.join(fixed)}.\n"
+    elif fixed is None:
+        body += "\ncargo-audit was not installed, so advisories were not checked.\n"
+    else:
+        body += "\nNo advisory against the old upstream release is fixed by the new one.\n"
+    if still:
+        body += f"\nStill affected: {', '.join(still)} ({UPSTREAM_NAME} {upstream}).\n"
+    if newly:
+        body += (f"\nNewly affected: {', '.join(newly)} (against {UPSTREAM_NAME} {upstream}, "
+                 f"not {old_upstream}).\n")
+    compare = f"https://github.com/{FORK_REPO}/compare/v{required}...v{version}"
+    body += (
+        f"\nOnly RustSec advisories against {UPSTREAM_NAME} itself are checked, not those "
+        f"against its dependencies, the fork's own changes, or GitHub advisories (GHSA) "
+        f"against {UPSTREAM_NAME} that are not in the RustSec database. Check the fork's "
+        f"changes since v{required} ({compare}) and add any advisory they fix to the "
+        "Cargo.toml comment before merging.\n"
+    )
+    if others:
+        body += ("\nCargo.lock also moved other packages:\n\n"
+                 + "".join(f"- {l}\n" for l in others))
+    if superseded:
+        body += "".join(f"\nSupersedes #{n}; close it and delete its branch.\n" for n in superseded)
+    body += (
+        "\nThis pull request changes the workspace requirement"
+        + (" and Cargo.lock" if moved else "")
+        + " only. "
+        "Downstream users get the new floor from a patch release of each published "
+        f"crate that declares {PACKAGE} (see \"Security process\" in "
+        "docs/rustls-quinn-forks-design.md).\n"
+        f"\nOpened by {FORK_REPO}'s release workflow (admin/ringline-raise).\n"
+    )
+    git("add", "Cargo.toml", "Cargo.lock")
+    git("commit", "--quiet", "-m", title, "-m", body)
+    print(title)
+    print(body)
+    if opts.push:
+        git("push", "--quiet", remote, branch)
+        gh("pr", "create", "--repo", opts.repo, "--base", opts.base, "--head", branch,
+           "--title", title, "--body", body)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Failed as e:
+        print(e, file=sys.stderr)
+        sys.exit(1)

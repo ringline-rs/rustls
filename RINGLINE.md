@@ -33,6 +33,11 @@ or later. The design is in ringline's
   tag out of the branch's history, so the next merge uses the previous
   upstream tag as its base and conflicts on everything upstream changed
   since.
+- A release is published by pushing a `vX.Y.Z` tag
+  (`ringline-release.yml`). When ringline's main requires an earlier 0.1.x
+  version, the same workflow then opens a pull request against it that
+  raises the `ringline-tls` requirement to the release and names the
+  upstream advisories the raise fixes (`admin/ringline-raise`).
 
 ## Using it
 
