@@ -18,6 +18,16 @@ changes:
   of both providers seal application-data records in the caller's buffer.
   API additions: `MessageEncrypter::encrypt_into` (a provided method
   that defaults to `encrypt` plus a copy) and `OutboundChunks::copy_to_slice`.
+- In the unbuffered API, `ReadTraffic::next_record` lends each application-data
+  record from the `incoming_tls` buffer it was decrypted in, without a copy.
+  The record's bytes are reported in `AppDataRecord::discard`, not in
+  `UnbufferedStatus::discard`, so a caller must add the record's discard, as
+  rustls documents. A record that is not read stays at the front of the
+  buffer, and `next_record` returns it from the `ReadTraffic` of the next
+  `process_tls_records` call; the caller must keep those bytes unchanged
+  until then. While a record is lent, `wants_read()` and
+  `current_io_state().plaintext_bytes_to_read` on an unbuffered connection do
+  not count it.
 
 The design is in ringline's
 [docs/rustls-quinn-forks-design.md](https://github.com/ringline-rs/ringline/blob/main/docs/rustls-quinn-forks-design.md).

@@ -8,8 +8,8 @@
 //!
 //! Measured on aarch64 Linux with the ring provider: send 1.00 at 1, 4 and
 //! 16 KiB records (the copy of the plaintext into the caller's buffer, sealed
-//! there by `MessageEncrypter::encrypt_into`); receive 1.00 (`into_vec` after
-//! the in-place decrypt).
+//! there by `MessageEncrypter::encrypt_into`); receive 0.00 (`next_record`
+//! lends the record decrypted in place in the caller's buffer).
 
 #![cfg(target_os = "linux")]
 
@@ -18,7 +18,7 @@ use std::process::Command;
 /// Most bytes copied per plaintext byte on send.
 const SEND_MAX: f64 = 1.1;
 /// Most bytes copied per plaintext byte on receive.
-const RECV_MAX: f64 = 1.1;
+const RECV_MAX: f64 = 0.1;
 
 #[test]
 fn bytes_copied_per_plaintext_byte() {

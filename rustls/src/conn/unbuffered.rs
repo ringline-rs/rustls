@@ -45,6 +45,10 @@ impl<Data> UnbufferedConnectionCommon<Data> {
         mut early_data_available: impl FnMut(&mut Self) -> bool,
         early_data_state: impl FnOnce(&'c mut Self, &'i mut [u8]) -> ConnectionState<'c, 'i, Data>,
     ) -> UnbufferedStatus<'c, 'i, Data> {
+        self.core
+            .common_state
+            .lend_received_plaintext = true;
+        let base = incoming_tls.as_ptr() as usize;
         let mut buffer = DeframerSliceBuffer::new(incoming_tls);
         let mut buffer_progress = self.core.hs_deframer.progress();
 
@@ -56,15 +60,17 @@ impl<Data> UnbufferedConnectionCommon<Data> {
                 );
             }
 
-            if !self
-                .core
-                .common_state
-                .received_plaintext
-                .is_empty()
+            if self.lent_record.is_some()
+                || !self
+                    .core
+                    .common_state
+                    .received_plaintext
+                    .is_empty()
             {
+                let lent_at = buffer.pending_discard();
                 break (
-                    buffer.pending_discard(),
-                    ReadTraffic::new(self, incoming_tls).into(),
+                    lent_at,
+                    ReadTraffic::new(self, incoming_tls, lent_at).into(),
                 );
             }
 
@@ -120,6 +126,7 @@ impl<Data> UnbufferedConnectionCommon<Data> {
                     Ok(new) => state = new,
 
                     Err(e) => {
+                        self.core.common_state.lent_plaintext = None;
                         buffer.queue_discard(buffer_progress.take_discard());
                         self.core.state = Err(e.clone());
                         return UnbufferedStatus {
@@ -129,7 +136,42 @@ impl<Data> UnbufferedConnectionCommon<Data> {
                     }
                 }
 
-                buffer.queue_discard(buffer_progress.take_discard());
+                let discard = buffer_progress.take_discard();
+                match self
+                    .core
+                    .common_state
+                    .lent_plaintext
+                    .take()
+                {
+                    // The record was decrypted in place and is lent from the caller's buffer.
+                    // Its bytes are left out of `UnbufferedStatus::discard` and reported in
+                    // `AppDataRecord::discard` instead, so a record that is not read stays at
+                    // the front of the buffer for the next call.
+                    Some((addr, len)) => {
+                        let record_at = base + buffer.pending_discard();
+                        match addr.checked_sub(record_at) {
+                            Some(start) if start + len <= discard => {
+                                self.lent_record = Some(LentRecord::new(
+                                    &buffer.filled_mut()[..discard],
+                                    start,
+                                    len,
+                                ));
+                            }
+                            _ => {
+                                buffer.queue_discard(discard);
+                                let e = Error::General(
+                                    "decrypted record is outside its TLS record".into(),
+                                );
+                                self.core.state = Err(e.clone());
+                                return UnbufferedStatus {
+                                    discard: buffer.pending_discard(),
+                                    state: Err(e),
+                                };
+                            }
+                        }
+                    }
+                    None => buffer.queue_discard(discard),
+                }
 
                 self.core.state = Ok(state);
             } else if self.wants_write {
@@ -324,11 +366,58 @@ impl<Data> fmt::Debug for ConnectionState<'_, '_, Data> {
     }
 }
 
+/// A decrypted application-data record left in the caller's `incoming_tls` buffer.
+pub(crate) struct LentRecord {
+    /// The record's length in the buffer, header included: its `AppDataRecord::discard`.
+    discard: usize,
+    /// The plaintext's offset from the start of the record.
+    start: usize,
+    /// The plaintext's length.
+    len: usize,
+    /// The record's header and its last (up to 16) bytes, which decryption leaves in place
+    /// (the AEAD tag). `next_record` checks the buffer still holds them before lending a
+    /// record that was not read in the call that decrypted it.
+    header: [u8; RECORD_HEADER_LEN],
+    tail: [u8; RECORD_TAIL_LEN],
+    tail_len: usize,
+}
+
+const RECORD_HEADER_LEN: usize = 5;
+const RECORD_TAIL_LEN: usize = 16;
+
+impl LentRecord {
+    /// `record` is the whole TLS record in the buffer, header included.
+    fn new(record: &[u8], start: usize, len: usize) -> Self {
+        let mut header = [0; RECORD_HEADER_LEN];
+        header.copy_from_slice(&record[..RECORD_HEADER_LEN]);
+        let tail_len = Ord::min(RECORD_TAIL_LEN, record.len() - RECORD_HEADER_LEN);
+        let mut tail = [0; RECORD_TAIL_LEN];
+        tail[..tail_len].copy_from_slice(&record[record.len() - tail_len..]);
+        Self {
+            discard: record.len(),
+            start,
+            len,
+            header,
+            tail,
+            tail_len,
+        }
+    }
+
+    /// Whether `record` (the bytes the record should occupy) still holds this record.
+    fn matches(&self, record: &[u8]) -> bool {
+        record.len() == self.discard
+            && record[..RECORD_HEADER_LEN] == self.header
+            && record[record.len() - self.tail_len..] == self.tail[..self.tail_len]
+    }
+}
+
 /// Application data is available
 pub struct ReadTraffic<'c, 'i, Data> {
     conn: &'c mut UnbufferedConnectionCommon<Data>,
-    // for forwards compatibility; to support in-place decryption in the future
-    _incoming_tls: &'i mut [u8],
+    incoming_tls: &'i mut [u8],
+    // Where a lent record starts in `incoming_tls`: the `UnbufferedStatus::discard` returned
+    // with this state.
+    lent_at: usize,
 
     // owner of the latest chunk obtained in `next_record`, as borrowed by
     // `AppDataRecord`
@@ -336,17 +425,51 @@ pub struct ReadTraffic<'c, 'i, Data> {
 }
 
 impl<'c, 'i, Data> ReadTraffic<'c, 'i, Data> {
-    fn new(conn: &'c mut UnbufferedConnectionCommon<Data>, _incoming_tls: &'i mut [u8]) -> Self {
+    fn new(
+        conn: &'c mut UnbufferedConnectionCommon<Data>,
+        incoming_tls: &'i mut [u8],
+        lent_at: usize,
+    ) -> Self {
         Self {
             conn,
-            _incoming_tls,
+            incoming_tls,
+            lent_at,
             chunk: None,
         }
     }
 
     /// Decrypts and returns the next available app-data record
+    ///
+    /// An application-data record is returned as a slice of `incoming_tls`, where it was
+    /// decrypted. Its bytes are counted in [`AppDataRecord::discard`], not in
+    /// [`UnbufferedStatus::discard`]. A record that is not read stays at the front of the
+    /// buffer, and `next_record` returns it from the `ReadTraffic` of the next
+    /// `process_tls_records` call. The caller must keep those bytes unchanged until then. If
+    /// the buffer is too short to hold the record, or the record's header or last 16 bytes
+    /// have changed, `next_record` returns an error, and so does every later
+    /// `process_tls_records` call that reads a record: the same error if the record
+    /// decrypts, otherwise the error from deframing or decrypting it. Other changes are not
+    /// detected.
     // TODO deprecate in favor of `Iterator` implementation, which requires in-place decryption
     pub fn next_record(&mut self) -> Option<Result<AppDataRecord<'_>, Error>> {
+        if let Some(record) = self.conn.lent_record.take() {
+            let start = self.lent_at + record.start;
+            let held = self
+                .incoming_tls
+                .get(self.lent_at..self.lent_at + record.discard);
+            if !held.is_some_and(|held| record.matches(held)) {
+                // The buffer is too short to hold the record, or its header or tag no longer
+                // match the record that was lent. Later records must not be returned after a
+                // lost one.
+                let e = Error::General("incoming_tls no longer holds the decrypted record".into());
+                self.conn.core.state = Err(e.clone());
+                return Some(Err(e));
+            }
+            return Some(Ok(AppDataRecord {
+                discard: record.discard,
+                payload: &self.incoming_tls[start..start + record.len],
+            }));
+        }
         self.chunk = self
             .conn
             .core
@@ -365,6 +488,9 @@ impl<'c, 'i, Data> ReadTraffic<'c, 'i, Data> {
     ///
     /// Returns `None` if there are no more app-data records
     pub fn peek_len(&self) -> Option<NonZeroUsize> {
+        if let Some(record) = &self.conn.lent_record {
+            return NonZeroUsize::new(record.len);
+        }
         self.conn
             .core
             .common_state
