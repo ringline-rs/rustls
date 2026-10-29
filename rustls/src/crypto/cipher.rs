@@ -7,6 +7,7 @@ use zeroize::Zeroize;
 use crate::enums::{ContentType, ProtocolVersion};
 use crate::error::Error;
 use crate::msgs::codec;
+use crate::msgs::message::HEADER_SIZE;
 pub use crate::msgs::message::{
     BorrowedPayload, InboundOpaqueMessage, InboundPlainMessage, OutboundChunks,
     OutboundOpaqueMessage, OutboundPlainMessage, PlainMessage, PrefixedPayload,
@@ -154,9 +155,74 @@ pub trait MessageEncrypter: Send + Sync {
         seq: u64,
     ) -> Result<OutboundOpaqueMessage, Error>;
 
+    /// Encrypt `msg` as [`encrypt`](Self::encrypt) does, and write the encoded record,
+    /// header included, to the start of `out`. Returns the number of bytes written.
+    ///
+    /// `out` must hold at least 5 + [`encrypted_payload_len`](Self::encrypted_payload_len)
+    /// bytes. For a shorter `out`, an implementation returns [`Error::EncryptError`]
+    /// before sealing anything, so the nonce for `seq` is not consumed; the default does.
+    ///
+    /// The default encrypts with `encrypt` and copies the encoded record into `out`. An
+    /// implementation that overrides it can seal in `out` and skip that copy.
+    fn encrypt_into(
+        &mut self,
+        msg: OutboundPlainMessage<'_>,
+        seq: u64,
+        out: &mut [u8],
+    ) -> Result<usize, Error> {
+        if out.len() < HEADER_SIZE + self.encrypted_payload_len(msg.payload.len()) {
+            return Err(Error::EncryptError);
+        }
+        let encoded = self.encrypt(msg, seq)?.encode();
+        let len = encoded.len();
+        out.get_mut(..len)
+            .ok_or(Error::EncryptError)?
+            .copy_from_slice(&encoded);
+        Ok(len)
+    }
+
     /// Return the length of the ciphertext that results from encrypting plaintext of
     /// length `payload_len`
     fn encrypted_payload_len(&self, payload_len: usize) -> usize;
+}
+
+/// Lay out a TLS 1.3 record for in-place sealing at the start of `out`: the record
+/// header for a payload of `total_len` bytes, then `msg`'s plaintext and inner content
+/// type. Returns the part to seal (plaintext and content type) and the part for the tag.
+///
+/// Fails with [`Error::EncryptError`] when `out` is shorter than the record, when
+/// `total_len` leaves no room for the content type, or when `msg`'s payload holds fewer
+/// bytes than its length (no part of the record to seal is left unwritten). In the last
+/// case the plaintext it copied is zeroed.
+#[cfg(any(feature = "ring", feature = "aws_lc_rs"))]
+pub(crate) fn tls13_record_in<'o>(
+    msg: &OutboundPlainMessage<'_>,
+    total_len: usize,
+    out: &'o mut [u8],
+) -> Result<(&'o mut [u8], &'o mut [u8]), Error> {
+    let payload_len = msg.payload.len();
+    let tag_len = total_len
+        .checked_sub(payload_len + 1)
+        .ok_or(Error::EncryptError)?;
+    let out = out
+        .get_mut(..HEADER_SIZE + total_len)
+        .ok_or(Error::EncryptError)?;
+    let (header, body) = out.split_at_mut(HEADER_SIZE);
+    // TLS 1.3 records carry ApplicationData and the legacy version TLSv1_2 (0x0303),
+    // see https://www.rfc-editor.org/rfc/rfc8446#section-5.1
+    header.copy_from_slice(&make_tls13_aad(total_len));
+    let (inner, tag) = body.split_at_mut(payload_len + 1);
+    if msg
+        .payload
+        .copy_to_slice(&mut inner[..payload_len])
+        != payload_len
+    {
+        inner[..payload_len].fill(0);
+        return Err(Error::EncryptError);
+    }
+    inner[payload_len] = msg.typ.into();
+    debug_assert_eq!(tag.len(), tag_len);
+    Ok((inner, tag))
 }
 
 impl dyn MessageEncrypter {
@@ -360,5 +426,171 @@ impl MessageDecrypter for InvalidMessageDecrypter {
         _seq: u64,
     ) -> Result<InboundPlainMessage<'a>, Error> {
         Err(Error::DecryptError)
+    }
+}
+
+#[cfg(all(test, any(feature = "ring", feature = "aws_lc_rs")))]
+mod tests {
+    use alloc::vec;
+    use alloc::vec::Vec;
+
+    use super::*;
+    use crate::suites::SupportedCipherSuite;
+
+    /// The TLS 1.3 suites of every compiled-in provider.
+    fn tls13_suites() -> Vec<(&'static str, SupportedCipherSuite)> {
+        let mut suites = Vec::new();
+        #[cfg(feature = "ring")]
+        suites.extend(
+            crate::crypto::ring::ALL_CIPHER_SUITES
+                .iter()
+                .map(|s| ("ring", *s)),
+        );
+        #[cfg(feature = "aws_lc_rs")]
+        suites.extend(
+            crate::crypto::aws_lc_rs::ALL_CIPHER_SUITES
+                .iter()
+                .map(|s| ("aws-lc-rs", *s)),
+        );
+        suites
+            .into_iter()
+            .filter(|(_, s)| s.tls13().is_some())
+            .collect()
+    }
+
+    fn encrypter(suite: SupportedCipherSuite) -> Box<dyn MessageEncrypter> {
+        let tls13 = suite.tls13().unwrap();
+        let key = AeadKey::from([7u8; 32]).with_length(tls13.aead_alg.key_len());
+        tls13
+            .aead_alg
+            .encrypter(key, Iv::new([9u8; NONCE_LEN]))
+    }
+
+    #[test]
+    fn encrypt_into_matches_encrypt() {
+        let plain: Vec<u8> = (0..3000u32).map(|i| i as u8).collect();
+        let parts: [&[u8]; 3] = [&plain[..1], &plain[1..1500], &plain[1500..]];
+        let suites = tls13_suites();
+        assert!(!suites.is_empty());
+        for (provider, suite) in suites {
+            for payload in [
+                OutboundChunks::Single(&plain),
+                OutboundChunks::Single(&[]),
+                OutboundChunks::new(&parts),
+                // A window into the chunks that starts and ends inside a chunk, as the
+                // message fragmenter makes.
+                OutboundChunks::new(&parts)
+                    .split_at(2000)
+                    .0
+                    .split_at(700)
+                    .1,
+            ] {
+                for typ in [ContentType::ApplicationData, ContentType::Handshake] {
+                    let msg = || OutboundPlainMessage {
+                        typ,
+                        version: ProtocolVersion::TLSv1_3,
+                        payload: payload.clone(),
+                    };
+                    let want = encrypter(suite)
+                        .encrypt(msg(), 5)
+                        .unwrap()
+                        .encode();
+                    let mut out = vec![0xaa; want.len() + 10];
+                    let n = encrypter(suite)
+                        .encrypt_into(msg(), 5, &mut out)
+                        .unwrap();
+                    assert_eq!(n, want.len(), "{provider} {:?}", suite.suite());
+                    assert_eq!(&out[..n], &want[..], "{provider} {:?}", suite.suite());
+                    assert!(out[n..].iter().all(|b| *b == 0xaa));
+                }
+            }
+        }
+    }
+
+    /// A `Multiple` whose `end` lies past its chunks' bytes is an error, not a record
+    /// sealed over bytes of `out` that were never written.
+    #[test]
+    fn encrypt_into_short_payload_is_an_error() {
+        let parts: [&[u8]; 2] = [&[1, 2], &[3, 4]];
+        for (provider, suite) in tls13_suites() {
+            let msg = OutboundPlainMessage {
+                typ: ContentType::ApplicationData,
+                version: ProtocolVersion::TLSv1_3,
+                payload: OutboundChunks::Multiple {
+                    chunks: &parts,
+                    start: 0,
+                    end: 10,
+                },
+            };
+            let mut out = vec![0xaa; 64];
+            assert!(
+                matches!(
+                    encrypter(suite).encrypt_into(msg, 0, &mut out),
+                    Err(Error::EncryptError)
+                ),
+                "{provider} {:?}",
+                suite.suite()
+            );
+        }
+    }
+
+    #[test]
+    fn encrypt_into_short_buffer_is_an_error() {
+        let plain = [1u8; 100];
+        for (provider, suite) in tls13_suites() {
+            let mut enc = encrypter(suite);
+            let msg = OutboundPlainMessage {
+                typ: ContentType::ApplicationData,
+                version: ProtocolVersion::TLSv1_3,
+                payload: OutboundChunks::Single(&plain),
+            };
+            let len = HEADER_SIZE + enc.encrypted_payload_len(plain.len());
+            let mut out = vec![0u8; len - 1];
+            assert!(
+                matches!(enc.encrypt_into(msg, 0, &mut out), Err(Error::EncryptError)),
+                "{provider} {:?}",
+                suite.suite()
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod default_encrypt_into_tests {
+    use alloc::vec;
+
+    use super::*;
+
+    /// Panics if `encrypt` is called, so a test can show the default `encrypt_into`
+    /// returned before encrypting.
+    struct MustNotEncrypt;
+
+    impl MessageEncrypter for MustNotEncrypt {
+        fn encrypt(
+            &mut self,
+            _msg: OutboundPlainMessage<'_>,
+            _seq: u64,
+        ) -> Result<OutboundOpaqueMessage, Error> {
+            panic!("encrypt called with a short buffer");
+        }
+
+        fn encrypted_payload_len(&self, payload_len: usize) -> usize {
+            payload_len + 17
+        }
+    }
+
+    #[test]
+    fn default_encrypt_into_checks_out_before_encrypting() {
+        let plain = [1u8; 100];
+        let msg = OutboundPlainMessage {
+            typ: ContentType::ApplicationData,
+            version: ProtocolVersion::TLSv1_3,
+            payload: OutboundChunks::Single(&plain),
+        };
+        let mut out = vec![0u8; HEADER_SIZE + 100 + 17 - 1];
+        assert!(matches!(
+            MustNotEncrypt.encrypt_into(msg, 0, &mut out),
+            Err(Error::EncryptError)
+        ));
     }
 }

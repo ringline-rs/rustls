@@ -117,6 +117,24 @@ impl RecordLayer {
             .unwrap()
     }
 
+    /// Encrypt a TLS message into the start of `out`, returning the encoded length.
+    ///
+    /// As [`encrypt_outgoing`](Self::encrypt_outgoing), and panics in the same cases,
+    /// and when `out` is shorter than the encoded record.
+    pub(crate) fn encrypt_outgoing_into(
+        &mut self,
+        plain: OutboundPlainMessage<'_>,
+        out: &mut [u8],
+    ) -> usize {
+        debug_assert!(self.encrypt_state == DirectionState::Active);
+        assert!(self.next_pre_encrypt_action() != PreEncryptAction::Refuse);
+        let seq = self.write_seq;
+        self.write_seq += 1;
+        self.message_encrypter
+            .encrypt_into(plain, seq, out)
+            .unwrap()
+    }
+
     /// Prepare to use the given `MessageEncrypter` for future message encryption.
     /// It is not used until you call `start_encrypting`.
     pub(crate) fn prepare_message_encrypter(
@@ -195,7 +213,7 @@ impl RecordLayer {
     /// Return a remedial action when we are near to encrypting too many messages.
     ///
     /// `add` is added to the current sequence number.  `add` as `0` means
-    /// "the next message processed by `encrypt_outgoing`"
+    /// "the next message processed by `encrypt_outgoing` or `encrypt_outgoing_into`"
     pub(crate) fn pre_encrypt_action(&self, add: u64) -> PreEncryptAction {
         match self.write_seq.saturating_add(add) {
             SEQ_HARD_LIMIT.. => PreEncryptAction::Refuse,
@@ -252,7 +270,7 @@ pub(crate) struct Decrypted<'a> {
 
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) enum PreEncryptAction {
-    /// No action is needed before calling `encrypt_outgoing`
+    /// No action is needed before calling `encrypt_outgoing` or `encrypt_outgoing_into`
     Nothing,
 
     /// A `key_update` request should be sent ASAP.
@@ -261,8 +279,8 @@ pub(crate) enum PreEncryptAction {
     /// alert should be sent instead.
     RefreshOrClose,
 
-    /// Do not call `encrypt_outgoing` further, it will panic rather than
-    /// over-use the key.
+    /// Do not call `encrypt_outgoing` or `encrypt_outgoing_into` further; they panic
+    /// rather than over-use the key.
     Refuse,
 }
 

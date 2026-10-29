@@ -5,13 +5,13 @@ use super::ring_like::{aead, hkdf, hmac};
 use crate::crypto;
 use crate::crypto::cipher::{
     AeadKey, InboundOpaqueMessage, Iv, MessageDecrypter, MessageEncrypter, Nonce,
-    Tls13AeadAlgorithm, UnsupportedOperationError, make_tls13_aad,
+    Tls13AeadAlgorithm, UnsupportedOperationError, make_tls13_aad, tls13_record_in,
 };
 use crate::crypto::tls13::{Hkdf, HkdfExpander, OkmBlock, OutputLengthError};
 use crate::enums::{CipherSuite, ContentType, ProtocolVersion};
 use crate::error::Error;
 use crate::msgs::message::{
-    InboundPlainMessage, OutboundOpaqueMessage, OutboundPlainMessage, PrefixedPayload,
+    HEADER_SIZE, InboundPlainMessage, OutboundOpaqueMessage, OutboundPlainMessage, PrefixedPayload,
 };
 use crate::suites::{CipherSuiteCommon, ConnectionTrafficSecrets, SupportedCipherSuite};
 use crate::tls13::Tls13CipherSuite;
@@ -225,6 +225,28 @@ impl MessageEncrypter for Tls13MessageEncrypter {
             ProtocolVersion::TLSv1_2,
             payload,
         ))
+    }
+
+    fn encrypt_into(
+        &mut self,
+        msg: OutboundPlainMessage<'_>,
+        seq: u64,
+        out: &mut [u8],
+    ) -> Result<usize, Error> {
+        let total_len = self.encrypted_payload_len(msg.payload.len());
+        let (inner, tag_out) = tls13_record_in(&msg, total_len, out)?;
+        let nonce = aead::Nonce::assume_unique_for_key(Nonce::new(&self.iv, seq).0);
+        let aad = aead::Aad::from(make_tls13_aad(total_len));
+        let Ok(tag) = self
+            .enc_key
+            .seal_in_place_separate_tag(nonce, aad, &mut *inner)
+        else {
+            // Leave no plaintext in the caller's buffer.
+            inner.fill(0);
+            return Err(Error::EncryptError);
+        };
+        tag_out.copy_from_slice(tag.as_ref());
+        Ok(HEADER_SIZE + total_len)
     }
 
     fn encrypted_payload_len(&self, payload_len: usize) -> usize {
