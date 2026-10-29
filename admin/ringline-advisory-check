@@ -54,7 +54,8 @@ def audit(version, workdir):
 
 def main():
     if len(sys.argv) == 3 and sys.argv[1] == "--ids":
-        # The advisory IDs against one rustls version, for admin/ringline-update.
+        # The advisory IDs against one rustls version, for admin/ringline-update
+        # and admin/ringline-raise.
         with tempfile.TemporaryDirectory() as d:
             print(" ".join(audit(sys.argv[2], d)))
         return
