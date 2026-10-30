@@ -366,7 +366,8 @@ def main():
         f"from that sentence while cargo-audit reports it against the new upstream "
         f"release. If you edit the sentence, it must keep the form `# {version} is "
         f"based on {UPSTREAM_NAME} {upstream} and is also past ID, ID.`: "
-        f"RUSTSEC-YYYY-NNNN or lowercase GHSA ids separated by `, `, with continuation "
+        f"RUSTSEC-YYYY-NNNN or GHSA-xxxx-xxxx-xxxx ids (GHSA in capitals, the rest "
+        f"lowercase) separated by `, `, with continuation "
         f"lines starting with `#   ` (three spaces). The next raise leaves a line in "
         f"any other form in place and does not carry its ids.\n"
     )
