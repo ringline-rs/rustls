@@ -28,10 +28,12 @@ script:
    manifest excludes the locked version, cargo ignores --precise and locks
    the newest compatible one (seen on cargo 1.88, 1.98 and 1.99). A lock
    already at or above the release is left as it is. It then checks the
-   lock with `cargo metadata --locked`. A comment above the requirement
-   names the upstream release and the advisories, under a heading line
-   added on the first raise. The pull request lists every other package the
-   lock moved.
+   lock with `cargo metadata --locked`. The comment directly above the
+   requirement (one sentence, `# X.Y.Z is based on UPSTREAM A.B.C...`,
+   wrapped) is rewritten to name this release, its upstream release, and the
+   advisories the old sentence named and this raise fixes, less any against
+   this release's upstream; see split_comment and comment_lines. The pull
+   request lists every other package the lock moved.
 4. Commits on `deps/PACKAGE-X.Y.Z`, or `deps/BASE/PACKAGE-X.Y.Z` when --base
    is not main. With --push, it pushes the branch to --repo and opens the
    pull request into --base. The pull request names the open raise pull
@@ -116,14 +118,45 @@ def requirement_re():
     return re.compile(rf'^({re.escape(PACKAGE)} = \{{ version = ")(\d+\.\d+\.\d+)(".*)$', re.M)
 
 
-def heading():
-    return f"# Raised by {FORK_REPO}'s release workflow (admin/ringline-raise):\n"
+ADVISORY_ID = r"(?:RUSTSEC-\d{4}-\d{4}|GHSA(?:-[0-9a-z]{4}){3})"
 
 
-def comment_lines(version, upstream, fixed):
-    text = f"{version} is {UPSTREAM_NAME} {upstream}"
-    if fixed:
-        text += ", past " + ", ".join(fixed)
+def legacy_heading():
+    """The heading `# Raised by FORK's release workflow (admin/ringline-raise):`
+    that ringline's manifest may still carry above lines in the form
+    `# X.Y.Z is UPSTREAM A.B.C[, past IDs].`; split_comment removes both."""
+    return f"# Raised by {FORK_REPO}'s release workflow (admin/ringline-raise):"
+
+
+def version_line_re():
+    """The first line of a comment in either form split_comment removes."""
+    return re.compile(rf"^# \d+\.\d+\.\d+ is (?:based on )?{re.escape(UPSTREAM_NAME)} ")
+
+
+def comment_sentence_re():
+    """The whole sentence of a comment in either form, joined onto one line:
+    `X.Y.Z is based on UPSTREAM A.B.C[ and is also past IDS].` as
+    comment_lines writes it, or `X.Y.Z is UPSTREAM A.B.C[, past IDS].`"""
+    ids = rf"{ADVISORY_ID}(?:, {ADVISORY_ID})*"
+    return re.compile(
+        rf"\d+\.\d+\.\d+ is (?:based on {re.escape(UPSTREAM_NAME)} \d+\.\d+\.\d+"
+        rf"(?: and is also past {ids})?|{re.escape(UPSTREAM_NAME)} \d+\.\d+\.\d+"
+        rf"(?:, past {ids})?)\."
+    )
+
+
+def advisory_ids_in(text):
+    return re.findall(rf"\b{ADVISORY_ID}\b", text)
+
+
+def comment_lines(version, upstream, past):
+    """The comment above the requirement: one sentence,
+    `# X.Y.Z is based on UPSTREAM A.B.C and is also past ID, ID.`, wrapped at
+    79 columns onto `#   ` lines. `past` holds the advisory ids the sentence
+    names."""
+    text = f"{version} is based on {UPSTREAM_NAME} {upstream}"
+    if past:
+        text += " and is also past " + ", ".join(past)
     lines, line = [], "#"
     for word in (text + ".").split():
         if len(line) + 1 + len(word) > 79 and line != "#":
@@ -134,15 +167,51 @@ def comment_lines(version, upstream, fixed):
     return "".join(l + "\n" for l in lines)
 
 
-def raise_requirement(text, version, upstream, fixed):
-    """`text` with the requirement raised and a comment above it. The heading
-    goes in on the first raise; later raises add their lines under it."""
+def split_comment(before):
+    """Split the text before the requirement into what stays and the comment
+    this script rewrites. That comment is the run of lines directly above the
+    requirement made of sentences in either form comment_sentence_re accepts
+    (a version line and its `#   ` continuation lines each) and legacy
+    headings, in any order. Lines in any other form are left in place."""
+    lines = before.splitlines(keepends=True)
+    keep = len(lines)
+    while keep > 0:
+        if lines[keep - 1].rstrip("\n") == legacy_heading():
+            keep -= 1
+            continue
+        i = keep
+        while i > 0 and lines[i - 1].startswith("#   "):
+            i -= 1
+        if i == 0 or not version_line_re().match(lines[i - 1]):
+            break
+        joined = " ".join(l[1:].strip() for l in lines[i - 1 : keep])
+        if not comment_sentence_re().fullmatch(joined):
+            break
+        keep = i - 1
+    return "".join(lines[:keep]), "".join(lines[keep:])
+
+
+def removed_ids(text, affected):
+    """The advisory ids in the comment split_comment would rewrite that
+    raise_requirement leaves out because they are in `affected`, once each."""
     m = requirement_re().search(text)
-    added = comment_lines(version, upstream, fixed)
-    if heading() not in text:
-        added = heading() + added
+    ids = dict.fromkeys(advisory_ids_in(split_comment(text[: m.start()])[1]))
+    return [a for a in ids if affected is not None and a in affected]
+
+
+def raise_requirement(text, version, upstream, fixed, affected):
+    """`text` with the requirement raised and the comment above it rewritten.
+    The new comment names the advisories the old one did, except those in
+    `affected` (the advisories against the new upstream release, or None when
+    they were not checked), followed by `fixed` (None or a list)."""
+    m = requirement_re().search(text)
+    kept, old = split_comment(text[: m.start()])
+    past = []
+    for adv in advisory_ids_in(old) + list(fixed or []):
+        if adv not in past and (affected is None or adv not in affected):
+            past.append(adv)
     line = f"{m.group(1)}{version}{m.group(3)}"
-    return text[: m.start()] + added + line + text[m.end() :]
+    return kept + comment_lines(version, upstream, past) + line + text[m.end() :]
 
 
 def locked_version(ringline, version):
@@ -259,7 +328,8 @@ def main():
         moved = relock(opts.ringline, locked, version)
     others = [l for l in moved if not re.match(rf"\S+ {re.escape(PACKAGE)} v", l)]
     with open(manifest, "w") as f:
-        f.write(raise_requirement(text, version, upstream, fixed))
+        f.write(raise_requirement(text, version, upstream, fixed, new_ids))
+    dropped = removed_ids(text, new_ids)
     run("cargo", "metadata", "--locked", "--format-version", "1", cwd=opts.ringline)
 
     release = f"https://github.com/{FORK_REPO}/releases/tag/v{version}"
@@ -270,7 +340,7 @@ def main():
     else:
         title = f"chore(deps): raise {PACKAGE} to {version}"
     body = (
-        f"{PACKAGE} {version} is {UPSTREAM_NAME} {upstream} ({release}). "
+        f"{PACKAGE} {version} is based on {UPSTREAM_NAME} {upstream} ({release}). "
         f"The requirement was {required} ({UPSTREAM_NAME} {old_upstream}).\n"
     )
     if fixed:
@@ -289,9 +359,22 @@ def main():
         f"\nOnly RustSec advisories against {UPSTREAM_NAME} itself are checked, not those "
         f"against its dependencies, the fork's own changes, or GitHub advisories (GHSA) "
         f"against {UPSTREAM_NAME} that are not in the RustSec database. Check the fork's "
-        f"changes since v{required} ({compare}) and add any advisory they fix to the "
-        "Cargo.toml comment before merging.\n"
+        f"changes since v{required} ({compare}) before merging. Add an advisory they "
+        f"fix to the hand-written list in the Cargo.toml comment above the sentence "
+        f"that directly precedes the requirement. A RUSTSEC id against "
+        f"{UPSTREAM_NAME} itself goes there too: the next raise removes such an id "
+        f"from that sentence while cargo-audit reports it against the new upstream "
+        f"release. If you edit the sentence, it must keep the form `# {version} is "
+        f"based on {UPSTREAM_NAME} {upstream} and is also past ID, ID.`: "
+        f"RUSTSEC-YYYY-NNNN or GHSA-xxxx-xxxx-xxxx ids (GHSA in capitals, the rest "
+        f"lowercase) separated by `, `, with continuation "
+        f"lines starting with `#   ` (three spaces). The next raise leaves a line in "
+        f"any other form in place and does not carry its ids.\n"
     )
+    if dropped:
+        body += (f"\nRemoved from the Cargo.toml comment, because cargo-audit reports "
+                 f"each against {UPSTREAM_NAME} {upstream}: {', '.join(dropped)}. Put "
+                 f"back in the hand-written list any that the fork's changes fix.\n")
     if others:
         body += ("\nCargo.lock also moved other packages:\n\n"
                  + "".join(f"- {l}\n" for l in others))
