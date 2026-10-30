@@ -10,8 +10,13 @@ on:
     - '**'
   pull_request:
   merge_group:
+  # Mondays 18:00 UTC. Pull requests and pushes to ringline/* run this
+  # workflow, so the schedule covers what changes without a commit: the
+  # stable, beta and nightly toolchains, and RustSec advisories against
+  # Cargo.lock (the audit job). ringline-advisories.yml checks the merged
+  # upstream rustls release daily.
   schedule:
-    - cron: '0 18 * * *'
+    - cron: '0 18 * * 1'
   workflow_dispatch:
 
 concurrency:
