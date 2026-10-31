@@ -11,6 +11,8 @@ use crate::crypto::cipher::{
 use crate::crypto::tls13::{Hkdf, HkdfExpander, OkmBlock, OutputLengthError};
 use crate::enums::{CipherSuite, ContentType, ProtocolVersion};
 use crate::error::Error;
+#[cfg(not(feature = "fips"))]
+use crate::msgs::message::OutboundChunks;
 use crate::msgs::message::{
     HEADER_SIZE, InboundPlainMessage, OutboundOpaqueMessage, OutboundPlainMessage, PrefixedPayload,
 };
@@ -308,6 +310,40 @@ struct GcmMessageEncrypter {
     iv: Iv,
 }
 
+impl GcmMessageEncrypter {
+    /// Seal `plain` and the content type `typ` from the caller's memory into `out`,
+    /// header first, without copying the plaintext into `out` beforehand.
+    #[cfg(not(feature = "fips"))]
+    fn encrypt_from(
+        &mut self,
+        plain: &[u8],
+        typ: ContentType,
+        seq: u64,
+        out: &mut [u8],
+    ) -> Result<usize, Error> {
+        let total_len = self.encrypted_payload_len(plain.len());
+        let out = out
+            .get_mut(..HEADER_SIZE + total_len)
+            .ok_or(Error::EncryptError)?;
+        let (header, body) = out.split_at_mut(HEADER_SIZE);
+        let aad = make_tls13_aad(total_len);
+        header.copy_from_slice(&aad);
+        let (ciphertext, extra_and_tag) = body.split_at_mut(plain.len());
+        let nonce = aead::Nonce::assume_unique_for_key(Nonce::new(&self.iv, seq).0);
+        self.enc_key
+            .seal_out_of_place_scatter(
+                nonce,
+                aead::Aad::from(aad),
+                plain,
+                ciphertext,
+                &typ.to_array(),
+                extra_and_tag,
+            )
+            .map_err(|_| Error::EncryptError)?;
+        Ok(HEADER_SIZE + total_len)
+    }
+}
+
 impl MessageEncrypter for GcmMessageEncrypter {
     fn encrypt(
         &mut self,
@@ -339,6 +375,10 @@ impl MessageEncrypter for GcmMessageEncrypter {
         seq: u64,
         out: &mut [u8],
     ) -> Result<usize, Error> {
+        #[cfg(not(feature = "fips"))]
+        if let OutboundChunks::Single(plain) = msg.payload {
+            return self.encrypt_from(plain, msg.typ, seq, out);
+        }
         let total_len = self.encrypted_payload_len(msg.payload.len());
         let (inner, tag_out) = tls13_record_in(&msg, total_len, out)?;
         let nonce = aead::Nonce::assume_unique_for_key(Nonce::new(&self.iv, seq).0);
