@@ -539,7 +539,7 @@ mod tests {
         let plain = [1u8; 100];
         for (provider, suite) in tls13_suites() {
             let mut enc = encrypter(suite);
-            let msg = OutboundPlainMessage {
+            let msg = || OutboundPlainMessage {
                 typ: ContentType::ApplicationData,
                 version: ProtocolVersion::TLSv1_3,
                 payload: OutboundChunks::Single(&plain),
@@ -547,7 +547,22 @@ mod tests {
             let len = HEADER_SIZE + enc.encrypted_payload_len(plain.len());
             let mut out = vec![0u8; len - 1];
             assert!(
-                matches!(enc.encrypt_into(msg, 0, &mut out), Err(Error::EncryptError)),
+                matches!(
+                    enc.encrypt_into(msg(), 0, &mut out),
+                    Err(Error::EncryptError)
+                ),
+                "{provider} {:?}",
+                suite.suite()
+            );
+            // Sealing with sequence number 0 succeeds only if the refused call did not
+            // seal. aws-lc-rs's TLS 1.3 AES-GCM key refuses a sequence number that is
+            // not greater than the last one it sealed with. The other suites' keys do
+            // not check, so for them this assertion always holds.
+            let mut out = vec![0u8; len];
+            assert_eq!(
+                enc.encrypt_into(msg(), 0, &mut out)
+                    .ok(),
+                Some(len),
                 "{provider} {:?}",
                 suite.suite()
             );
