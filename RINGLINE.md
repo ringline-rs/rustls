@@ -18,6 +18,14 @@ changes:
   of both providers seal application-data records in the caller's buffer.
   API additions: `MessageEncrypter::encrypt_into` (a provided method
   that defaults to `encrypt` plus a copy) and `OutboundChunks::copy_to_slice`.
+- With aws-lc-rs, the TLS 1.3 AES-GCM encrypter's `encrypt_into` seals an
+  `OutboundChunks::Single` payload with
+  `TlsRecordSealingKey::seal_out_of_place_scatter`, which reads the
+  plaintext from the payload's slice and writes the ciphertext and tag after
+  the header in the caller's buffer, so `WriteTraffic::encrypt` does not
+  copy the plaintext. For an `OutboundChunks::Multiple` payload, for
+  ChaCha20-Poly1305, and when aws-lc-rs is in FIPS mode, the encrypter
+  copies the plaintext into the buffer and seals it there.
 - In the unbuffered API, `ReadTraffic::next_record` lends each application-data
   record from the `incoming_tls` buffer it was decrypted in, without a copy.
   The record's bytes are reported in `AppDataRecord::discard`, not in

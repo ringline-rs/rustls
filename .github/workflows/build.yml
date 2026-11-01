@@ -125,6 +125,10 @@ jobs:
         if: runner.os == 'Linux'
         run: cargo test --locked -p ringline-tls-copy-count
 
+      - name: cargo test (bytes copied per plaintext byte; release; all features)
+        if: runner.os == 'Linux'
+        run: cargo test --release --locked --all-features -p ringline-tls -p ringline-tls-copy-count --test copy_count
+
       - name: cargo package --all-features -p ringline-tls
         run: cargo package --all-features -p ringline-tls
 

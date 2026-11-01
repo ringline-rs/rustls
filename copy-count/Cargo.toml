@@ -9,7 +9,7 @@ publish = false
 [dependencies]
 libc = "0.2"
 rcgen = { workspace = true }
-rustls = { package = "ringline-tls", path = "../rustls", default-features = false, features = ["std", "ring"] }
+rustls = { package = "ringline-tls", path = "../rustls", default-features = false, features = ["std", "ring", "aws_lc_rs"] }
 
 [build-dependencies]
 cc = "1"

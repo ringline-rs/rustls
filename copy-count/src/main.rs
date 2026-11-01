@@ -1,6 +1,8 @@
 //! Measures the bytes ringline-tls copies per plaintext byte on the
 //! unbuffered API's send (`WriteTraffic::encrypt`) and receive
-//! (`ReadTraffic::next_record`) paths, TLS 1.3 with the ring provider.
+//! (`ReadTraffic::next_record`) paths, TLS 1.3, with the ring provider and
+//! with the aws-lc-rs provider on TLS13_AES_256_GCM_SHA384 (reported as
+//! `aws-lc-rs-fips` when aws-lc-rs is in FIPS mode).
 //!
 //! Run it with the shim from `shim.c` in `LD_PRELOAD`; the
 //! `copy_count` test does. Copies of fewer than 256 bytes are not counted.
@@ -8,13 +10,14 @@
 //!
 //! ```text
 //! control <memcpy calls> <memcpy bytes>
-//! send <record size> <memcpy+memmove bytes per plaintext byte>
-//! recv <record size> <memcpy+memmove bytes per plaintext byte>
+//! send <provider> <record size> <memcpy+memmove bytes per plaintext byte>
+//! recv <provider> <record size> <memcpy+memmove bytes per plaintext byte>
 //! ```
 
 use std::sync::Arc;
 
 use rustls::client::UnbufferedClientConnection;
+use rustls::crypto::CryptoProvider;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
 use rustls::server::UnbufferedServerConnection;
 use rustls::unbuffered::{ConnectionState, EncodeError};
@@ -116,7 +119,28 @@ fn main() {
     std::hint::black_box((&dst, &v));
     println!("control {} {}", m[0], m[1]);
 
-    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    measure(&meter, "ring", rustls::crypto::ring::default_provider());
+    // Pinned to AES-256-GCM. Both AES-GCM suites seal out of place and
+    // ChaCha20-Poly1305 does not, so pinning keeps the negotiated suite from
+    // changing the result. In FIPS mode the encrypter seals in place; the
+    // suite's `fips()` makes the same check, and that run is reported as
+    // `aws-lc-rs-fips`.
+    let aws_lc_rs = CryptoProvider {
+        cipher_suites: vec![rustls::crypto::aws_lc_rs::cipher_suite::TLS13_AES_256_GCM_SHA384],
+        ..rustls::crypto::aws_lc_rs::default_provider()
+    };
+    let name = if aws_lc_rs.cipher_suites[0].fips() {
+        "aws-lc-rs-fips"
+    } else {
+        "aws-lc-rs"
+    };
+    measure(&meter, name, aws_lc_rs);
+}
+
+/// Handshake a TLS 1.3 client and server on `provider`, then print the send
+/// and receive lines for `name`.
+fn measure(meter: &Meter, name: &str, provider: CryptoProvider) {
+    let provider = Arc::new(provider);
     let ck = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
     let cert = CertificateDer::from(ck.cert.der().to_vec());
     let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(ck.signing_key.serialize_der()));
@@ -171,7 +195,7 @@ fn main() {
             wire.extend_from_slice(&out[..n]);
         }
         println!(
-            "send {record} {:.4}",
+            "send {name} {record} {:.4}",
             copied as f64 / plaintext.len() as f64
         );
 
@@ -202,6 +226,9 @@ fn main() {
             }
         }
         assert_eq!(received, plaintext.len(), "received plaintext");
-        println!("recv {record} {:.4}", copied as f64 / received as f64);
+        println!(
+            "recv {name} {record} {:.4}",
+            copied as f64 / received as f64
+        );
     }
 }

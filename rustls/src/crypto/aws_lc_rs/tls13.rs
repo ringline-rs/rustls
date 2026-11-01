@@ -12,7 +12,8 @@ use crate::crypto::tls13::{Hkdf, HkdfExpander, OkmBlock, OutputLengthError};
 use crate::enums::{CipherSuite, ContentType, ProtocolVersion};
 use crate::error::Error;
 use crate::msgs::message::{
-    HEADER_SIZE, InboundPlainMessage, OutboundOpaqueMessage, OutboundPlainMessage, PrefixedPayload,
+    HEADER_SIZE, InboundPlainMessage, OutboundChunks, OutboundOpaqueMessage, OutboundPlainMessage,
+    PrefixedPayload,
 };
 use crate::suites::{CipherSuiteCommon, ConnectionTrafficSecrets, SupportedCipherSuite};
 use crate::tls13::Tls13CipherSuite;
@@ -191,6 +192,10 @@ impl AeadAlgorithm {
             )
             .unwrap(),
             iv,
+            // In FIPS mode (`super::fips()`, the check the AES-GCM suites' `fips()`
+            // makes) the encrypter seals in place: whether the AWS-LC FIPS security
+            // policy covers the out-of-place seal has not been checked.
+            out_of_place: !super::fips(),
         })
     }
 
@@ -306,6 +311,43 @@ impl MessageDecrypter for AeadMessageDecrypter {
 struct GcmMessageEncrypter {
     enc_key: aead::TlsRecordSealingKey,
     iv: Iv,
+    /// Whether `encrypt_into` seals a `Single` payload with `encrypt_from`.
+    out_of_place: bool,
+}
+
+impl GcmMessageEncrypter {
+    /// Write the TLS 1.3 record for `plain` with inner content type `typ` to the
+    /// start of `out` and return its length: the header, the ciphertext of
+    /// `plain`, then the encrypted `typ` and the tag. Fails with
+    /// `Error::EncryptError` before sealing when `out` is shorter than the record.
+    fn encrypt_from(
+        &mut self,
+        plain: &[u8],
+        typ: ContentType,
+        seq: u64,
+        out: &mut [u8],
+    ) -> Result<usize, Error> {
+        let total_len = self.encrypted_payload_len(plain.len());
+        let out = out
+            .get_mut(..HEADER_SIZE + total_len)
+            .ok_or(Error::EncryptError)?;
+        let (header, body) = out.split_at_mut(HEADER_SIZE);
+        let aad = make_tls13_aad(total_len);
+        header.copy_from_slice(&aad);
+        let (ciphertext, extra_and_tag) = body.split_at_mut(plain.len());
+        let nonce = aead::Nonce::assume_unique_for_key(Nonce::new(&self.iv, seq).0);
+        self.enc_key
+            .seal_out_of_place_scatter(
+                nonce,
+                aead::Aad::from(aad),
+                plain,
+                ciphertext,
+                &typ.to_array(),
+                extra_and_tag,
+            )
+            .map_err(|_| Error::EncryptError)?;
+        Ok(HEADER_SIZE + total_len)
+    }
 }
 
 impl MessageEncrypter for GcmMessageEncrypter {
@@ -339,6 +381,11 @@ impl MessageEncrypter for GcmMessageEncrypter {
         seq: u64,
         out: &mut [u8],
     ) -> Result<usize, Error> {
+        if let OutboundChunks::Single(plain) = msg.payload {
+            if self.out_of_place {
+                return self.encrypt_from(plain, msg.typ, seq, out);
+            }
+        }
         let total_len = self.encrypted_payload_len(msg.payload.len());
         let (inner, tag_out) = tls13_record_in(&msg, total_len, out)?;
         let nonce = aead::Nonce::assume_unique_for_key(Nonce::new(&self.iv, seq).0);
